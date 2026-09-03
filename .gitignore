@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# 作業領域（アップロード原稿・中間成果物・レポート）
+workspace/
+out/
+data/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
