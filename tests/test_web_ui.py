@@ -59,6 +59,21 @@ def test_select_page_catches_errors_and_reports_page_status() -> None:
     assert 'byId("page-status")' in select_page_body.split("catch (err)")[1]
 
 
+def test_reanalyze_guards_against_out_of_order_responses() -> None:
+    """Review #26: 400ms デバウンス後に発火した再解析リクエストのキャンセル・順序保証が
+    無いと、先に発火した A が B より後に完了して古い結果で表示を上書きしうる。
+    世代番号（`seq`）比較で追い越されたレスポンスを捨てていることを構造的に検証する。"""
+    source = (WEB_DIR / "js" / "app.js").read_text(encoding="utf-8")
+
+    reanalyze_start = source.index("async function reanalyze(")
+    next_function_start = source.index("\nfunction ", reanalyze_start + 1)
+    reanalyze_body = source[reanalyze_start:next_function_start]
+
+    assert "++latestReanalyzeSeq" in reanalyze_body
+    assert "seq !== latestReanalyzeSeq" in reanalyze_body
+    assert "AbortController" in reanalyze_body
+
+
 def test_no_node_dependency_or_cdn_reference_anywhere_in_web_dir() -> None:
     """非機能要件・完了条件: npm / node_modules / CDN リンクが一切存在しないこと。"""
     forbidden_substrings = ["node_modules", "unpkg.com", "cdn.jsdelivr.net", "cdnjs.cloudflare.com"]
