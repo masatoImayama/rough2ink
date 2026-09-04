@@ -181,8 +181,11 @@ def test_e2e_psd_path_layer_mapping_gt_metrics_analyze_and_batch(
     # レイヤー一覧（UI のレイヤーマッピング画面が使う入力）。
     layers_response = client.get(f"/api/pages/{page_id}/layers")
     assert layers_response.status_code == 200
-    layer_paths = [layer["path"] for layer in layers_response.json()]
+    layers = layers_response.json()
+    layer_paths = [layer["path"] for layer in layers]
     assert "Group1/FillLayer" in layer_paths
+    # GT マッピングのキーは `LayerInfo.id`（同名レイヤーがあっても衝突しない、#20）。
+    fill_layer_id = next(layer["id"] for layer in layers if layer["path"] == "Group1/FillLayer")
 
     # 60x60 と小さいフィクスチャのため、専用の緩い品質閾値を使う。
     params = AnalysisParams(quality=QualityParams(min_short_side=1))
@@ -196,7 +199,7 @@ def test_e2e_psd_path_layer_mapping_gt_metrics_analyze_and_batch(
 
     # 役割マッピングを保存（UI「3. PSD レイヤー役割マッピング」画面が呼ぶ経路）。
     put_response = client.put(
-        f"/api/pages/{page_id}/gt", json={"mapping": {"Group1/FillLayer": "fill"}}
+        f"/api/pages/{page_id}/gt", json={"mapping": {fill_layer_id: "fill"}}
     )
     assert put_response.status_code == 200
 
@@ -233,8 +236,14 @@ def test_e2e_psd_path_layer_mapping_gt_metrics_analyze_and_batch(
     assert first_status["report"]["pages_with_metrics"] == 0
     assert not (out_dir / "art" / "metrics.json").is_file()
 
+    # バッチ側の page_id ("art") で改めてレイヤー id を解決する（ページごとに独立した id 空間）。
+    batch_layers_response = client.get("/api/pages/art/layers")
+    assert batch_layers_response.status_code == 200
+    batch_fill_layer_id = next(
+        layer["id"] for layer in batch_layers_response.json() if layer["path"] == "Group1/FillLayer"
+    )
     batch_gt_response = client.put(
-        "/api/pages/art/gt", json={"mapping": {"Group1/FillLayer": "fill"}}
+        "/api/pages/art/gt", json={"mapping": {batch_fill_layer_id: "fill"}}
     )
     assert batch_gt_response.status_code == 200
 

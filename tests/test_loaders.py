@@ -180,11 +180,14 @@ def test_load_psd_handles_japanese_and_space_in_path(tmp_path: Path) -> None:
     assert len(doc.layers) == 2
 
 
-def test_extract_layer_raster_returns_pixel_data_for_layer_path(tmp_path: Path) -> None:
+def test_extract_layer_raster_returns_pixel_data_for_layer_id(tmp_path: Path) -> None:
     path = tmp_path / "art.psd"
     _make_psd(path)
+    doc = load_psd(path)
+    by_path = {layer.path: layer for layer in doc.layers}
+    layer_id = by_path["Group1/BlackLayer1"].id
 
-    raster = extract_layer_raster(path, "Group1/BlackLayer1")
+    raster = extract_layer_raster(path, layer_id)
 
     assert raster is not None
     assert raster.shape == (10, 10)
@@ -192,11 +195,63 @@ def test_extract_layer_raster_returns_pixel_data_for_layer_path(tmp_path: Path) 
     assert raster.max() < 10
 
 
-def test_extract_layer_raster_returns_none_for_unknown_path(tmp_path: Path) -> None:
+def test_extract_layer_raster_returns_none_for_unknown_id(tmp_path: Path) -> None:
     path = tmp_path / "art.psd"
     _make_psd(path)
 
-    assert extract_layer_raster(path, "存在しないパス") is None
+    assert extract_layer_raster(path, "idx999") is None
+
+
+# --- psd_loader: 同名レイヤー（#20） -----------------------------------------
+
+
+def _make_psd_with_duplicate_layer_names(path: Path) -> None:
+    """同一グループ内に同名レイヤーを2枚持つ PSD を作る（#20 の回帰）。
+
+    実PSDでは「レイヤー 1」「レイヤー 1 のコピー」のような重複名が日常的に存在する
+    （Epic 仕様書 4-A 節: レイヤー命名規則は一貫していない前提）。片方を暗い塗り、
+    もう片方を明るい塗りにしておくことで、id 解決の取り違えを画素値で検出できる。
+    """
+    psd = PSDImage.new("RGB", (40, 30), color=255)
+    group = Group.new(psd, "Group1")
+    dark = np.zeros((10, 10, 3), dtype=np.uint8)
+    light = np.full((10, 10, 3), 200, dtype=np.uint8)
+    PixelLayer.frompil(Image.fromarray(dark, mode="RGB"), group, "DupLayer", top=0, left=0)
+    PixelLayer.frompil(Image.fromarray(light, mode="RGB"), group, "DupLayer", top=15, left=15)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    psd.save(str(path))
+
+
+def test_load_psd_assigns_unique_ids_to_layers_with_duplicate_names(tmp_path: Path) -> None:
+    path = tmp_path / "dup.psd"
+    _make_psd_with_duplicate_layer_names(path)
+
+    doc = load_psd(path)
+
+    dup_layers = [layer for layer in doc.layers if layer.name == "DupLayer"]
+    assert len(dup_layers) == 2
+    # path（表示用）は同一になりうるが、id は一意に区別できる。
+    assert dup_layers[0].path == dup_layers[1].path == "Group1/DupLayer"
+    assert dup_layers[0].id != dup_layers[1].id
+
+
+def test_extract_layer_raster_resolves_duplicate_named_layers_independently(tmp_path: Path) -> None:
+    """同名レイヤーが2枚あっても、id で指定した方だけを正しく解決できること（#20）。"""
+    path = tmp_path / "dup.psd"
+    _make_psd_with_duplicate_layer_names(path)
+    doc = load_psd(path)
+    dup_layers = [layer for layer in doc.layers if layer.name == "DupLayer"]
+
+    raster_a = extract_layer_raster(path, dup_layers[0].id)
+    raster_b = extract_layer_raster(path, dup_layers[1].id)
+
+    assert raster_a is not None
+    assert raster_b is not None
+    # path 基準（旧実装）だと常に同一レイヤーが返り raster_a == raster_b になっていたはず。
+    assert not np.array_equal(raster_a, raster_b)
+    maxima = sorted([raster_a.max(), raster_b.max()])
+    assert maxima[0] < 10  # 暗い方のレイヤー
+    assert maxima[1] > 190  # 明るい方のレイヤー
 
 
 def test_map_kind_maps_type_layer_to_type() -> None:

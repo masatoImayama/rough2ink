@@ -18,7 +18,11 @@ router = APIRouter(prefix="/api", tags=["gt"])
 
 
 class GTMapping(BaseModel):
-    """レイヤーパス（`LayerInfo.path`）→役割の手動マッピング。"""
+    """レイヤーキー（`LayerInfo.id`）→役割の手動マッピング。
+
+    `LayerInfo.path` は同名レイヤーがあると一意性を保証しないため（#20）、
+    マッピングのキーには使わない。
+    """
 
     mapping: dict[str, LayerRole]
 

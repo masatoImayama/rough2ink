@@ -33,9 +33,9 @@ BBox = tuple[int, int, int, int]
 class LayerInfo(BaseModel):
     """PSD レイヤー1枚分の情報（設計書 4章 A）。"""
 
-    id: str
+    id: str  # 一意なレイヤーキー（`lid<layer_id>` または `idx<n>`）。GT マッピング等はこれで解決する
     name: str
-    path: str  # グループ階層をスラッシュ区切りにした一意なパス
+    path: str  # グループ階層をスラッシュ区切りにした表示用パス。同名レイヤーがあると重複しうる（#20）
     kind: LayerKind
     visible: bool = True
     opacity: float = 1.0
