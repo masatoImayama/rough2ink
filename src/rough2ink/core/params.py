@@ -58,6 +58,7 @@ class BalloonParams(BaseModel):
     """E. フキダシ検出 → 損失マスク用パラメータ。"""
 
     min_area_ratio: float = 0.002
+    max_area_ratio: float = 0.25
     white_threshold: int = 235
     white_fill_ratio: float = 0.90
     min_solidity: float = 0.90

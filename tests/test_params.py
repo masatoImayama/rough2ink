@@ -36,6 +36,7 @@ EXPECTED_DEFAULTS: dict[str, dict[str, float | int]] = {
     },
     "balloon": {
         "min_area_ratio": 0.002,
+        "max_area_ratio": 0.25,
         "white_threshold": 235,
         "white_fill_ratio": 0.90,
         "min_solidity": 0.90,
