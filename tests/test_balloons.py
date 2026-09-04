@@ -268,3 +268,79 @@ def test_realistic_page_loss_mask_does_not_cover_whole_page() -> None:
 
     coverage = float(np.count_nonzero(mask)) / mask.size
     assert coverage < 0.3, f"loss mask covers {coverage:.4f} of page (expected < 0.3)"
+
+
+# --- #28 回帰: コマ枠を跨いではみ出したフキダシ ---
+#
+# `_touches_border` は外接矩形が画像外周に接する白連結成分を一律除外するが、フキダシが
+# コマ枠を跨いで余白（gutter）へはみ出すと、跨いだ箇所の枠線インクごとフキダシに塗り
+# 潰され、コマ内側と余白が地続きの 1 連結成分になるため、丸ごと除外されてしまっていた
+# （レビュー実測: コマ内部配置は被覆率 0.0454、コマ枠を跨ぐ配置は被覆率 0.0000）。
+
+_CROSS_SIZE = (400, 300)  # (height, width)。レビュー実測と同じページサイズ
+_CROSS_PANEL_RECT = (20, 20, 280, 380)  # (x0, y0, x1, y1)。レビュー実測と同じコマ枠
+_CROSS_ELLIPSE_AXES = (40, 25)
+_CROSS_INTERIOR_CENTER = (150, 150)  # コマ内部（比較対象のベースライン）
+_CROSS_BORDER_CROSSING_CENTER = (30, 150)  # コマ枠を跨ぐ配置。レビュー実測と同じ
+
+
+def _cross_page(center: tuple[int, int], *, balloon_has_border: bool) -> np.ndarray:
+    """レビュー実測と同じ、実際に枠線を描いたコマを 1 つ持つページを作る。
+
+    他のテストが使う `_blank_canvas`（塗りつぶしのみで枠線を描かない）では、コマ枠線
+    そのもの（`cv2.rectangle(..., 0, 3)`）が無いためこの回帰を再現できない。分離線
+    バリア（`_panel_border_barrier`）の検出対象は実際に描かれた枠線インクである。
+    """
+    height, width = _CROSS_SIZE
+    page = np.full((height, width), _PAGE_BACKGROUND, dtype=np.uint8)
+    x0, y0, x1, y1 = _CROSS_PANEL_RECT
+    cv2.rectangle(page, (x0, y0), (x1, y1), 0, 3)
+    cv2.rectangle(page, (x0 + 3, y0 + 3), (x1 - 3, y1 - 3), _PANEL_FILL, -1)
+    if balloon_has_border:
+        cv2.ellipse(page, center, _CROSS_ELLIPSE_AXES, 0, 0, 360, 255, -1)
+        cv2.ellipse(page, center, _CROSS_ELLIPSE_AXES, 0, 0, 360, 0, 3)
+    else:
+        cv2.ellipse(page, center, _CROSS_ELLIPSE_AXES, 0, 0, 360, 255, -1)
+    return page
+
+
+@pytest.mark.parametrize("balloon_has_border", [True, False], ids=["with-border", "borderless"])
+def test_balloon_crossing_panel_border_is_not_dropped(balloon_has_border: bool) -> None:
+    """コマ枠を跨いではみ出したフキダシが損失マスクから丸ごと脱落しない（#28 回帰）。
+
+    レビュー実測（フチあり）: コマ内部配置は被覆率 0.0454（中心が覆われる）に対し、
+    コマ枠を跨ぐ配置は被覆率 0.0000（中心が覆われない）だった。これはコマ枠を跨いだ
+    箇所の枠線インクがフキダシに塗り潰され、コマ内側と余白が地続きの 1 連結成分に
+    なり `_touches_border` による背景除外へ丸ごと巻き込まれるため。フチなしでも
+    同じ現象が起きる（レビューコメント参照）。
+    """
+    params = BalloonParams()
+
+    interior_page = _cross_page(_CROSS_INTERIOR_CENTER, balloon_has_border=balloon_has_border)
+    crossing_page = _cross_page(_CROSS_BORDER_CROSSING_CENTER, balloon_has_border=balloon_has_border)
+
+    interior_mask = detect_balloons(interior_page, params)
+    crossing_mask = detect_balloons(crossing_page, params)
+
+    # ベースライン: コマ内部配置は修正前後を通じて検出される（回帰していないことの確認）。
+    assert interior_mask[_CROSS_INTERIOR_CENTER[1], _CROSS_INTERIOR_CENTER[0]] == 255
+
+    # 修正前はここが 0（被覆率 0.0000）だった。
+    assert crossing_mask[_CROSS_BORDER_CROSSING_CENTER[1], _CROSS_BORDER_CROSSING_CENTER[0]] == 255
+    crossing_coverage = float(np.count_nonzero(crossing_mask)) / crossing_mask.size
+    assert crossing_coverage > 0.0, f"crossing coverage is {crossing_coverage:.4f} (expected > 0)"
+
+
+def test_panel_border_barrier_does_not_reintroduce_whole_page_coverage() -> None:
+    """コマ枠バリア導入後も、ページ全面が損失マスクで覆われることはない（#15 の非退行）。
+
+    `test_realistic_page_loss_mask_does_not_cover_whole_page` と同じ被覆率
+    アサーションを、コマ枠を跨ぐフキダシを含むページに対しても確認する。
+    """
+    page = _cross_page(_CROSS_BORDER_CROSSING_CENTER, balloon_has_border=True)
+    params = BalloonParams()
+
+    mask = detect_balloons(page, params)
+
+    coverage = float(np.count_nonzero(mask)) / mask.size
+    assert coverage < 0.3, f"loss mask covers {coverage:.4f} of page (expected < 0.3)"
