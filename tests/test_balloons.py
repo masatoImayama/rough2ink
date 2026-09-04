@@ -3,6 +3,12 @@
 実原稿は手元にないため合成フィクスチャで検証する（Epic 実装計画書「テスト方針」）。
 白楕円（フチあり）・フチなし白領域・テキスト矩形の 3 パターンで検出されること、
 3 つの手がかりが個別に有効/無効を切り替えられ、それぞれの寄与が確認できることを見る。
+
+キャンバスは実原稿と同じ極性（ページ背景が白 = 255）で構成する。ページ背景は画像の
+外周まで達する巨大な白領域になるが、フキダシ検出の対象ではないため、コマ枠を模した
+暗い矩形（`_PANEL_FILL`）で作画領域を作り、その内側にフキダシ形状を描く。これにより
+「ページ背景全体が損失マスクとして誤検出される」という回帰（#15）も自然にテストされる
+（背景が誤検出されれば、各手がかりの独立性テストの範囲外まで mask が広がってしまう）。
 """
 
 from __future__ import annotations
@@ -15,13 +21,24 @@ from rough2ink.core.balloons import detect_balloons
 from rough2ink.core.params import BalloonParams
 
 _SIZE = 200
-_BACKGROUND = 20  # 暗い背景（フキダシの白領域と区別できる値）
+_PAGE_BACKGROUND = 255  # 実原稿と同じ白いページ背景（画像の外周まで達する）
+_PANEL_FILL = 20  # コマ枠内側の作画を模した暗い色（ページ背景と区別するため）
+_PANEL_RECT = (30, 30, 170, 170)  # コマ枠内側の作画領域 (x0, y0, x1, y1)
 _ELLIPSE_CENTER = (100, 100)
 _ELLIPSE_AXES = (40, 25)  # (半長軸, 半短軸)
 
 
 def _blank_canvas() -> np.ndarray:
-    return np.full((_SIZE, _SIZE), _BACKGROUND, dtype=np.uint8)
+    """白いページ背景 + コマ枠内側の暗い作画領域を持つキャンバス。
+
+    ページ背景をそのまま白一色にすると、フキダシ形状も白なので区別が付かなくなる
+    （実原稿でもフチなしフキダシがページ背景と地続きなら区別不能なのは同じ）。
+    そのためコマ枠内側だけを暗くし、その中にフキダシ形状を描く。
+    """
+    canvas = np.full((_SIZE, _SIZE), _PAGE_BACKGROUND, dtype=np.uint8)
+    x0, y0, x1, y1 = _PANEL_RECT
+    cv2.rectangle(canvas, (x0, y0), (x1, y1), _PANEL_FILL, -1)
+    return canvas
 
 
 def _draw_ellipse_with_border(canvas: np.ndarray) -> np.ndarray:
@@ -138,17 +155,26 @@ def test_text_rect_clue_contributes_independently() -> None:
 
 
 def test_output_mask_is_wider_than_raw_white_region() -> None:
-    """出力マスクが入力の白領域そのものより広い（最終膨張が効いている）ことを確認する。"""
+    """出力マスクが入力の白領域そのものより広い（最終膨張が効いている）ことを確認する。
+
+    比較の基準はコマ枠内側（フキダシそのもの）の生の白画素数に限定する。ページ背景の
+    生の白画素はそもそも損失マスクの対象外（#15）であり、そのまま比較に含めると
+    「膨張したのに raw より狭くなる」という無関係な理由で失敗してしまうため。
+    """
     gray = _draw_ellipse_with_border(_blank_canvas())
     params = BalloonParams()
 
-    raw_white_count = int(np.count_nonzero(gray > params.white_threshold))
+    x0, y0, x1, y1 = _PANEL_RECT
+    panel_gray = gray[y0:y1, x0:x1]
+    raw_white_count = int(np.count_nonzero(panel_gray > params.white_threshold))
+
     mask = detect_balloons(gray, params)
     mask_count = int(np.count_nonzero(mask))
+    panel_mask = mask[y0:y1, x0:x1]
 
     assert mask_count > raw_white_count
-    # 白領域そのものが縮んではいけない（膨張のみで縮小はしていない）
-    assert np.all(mask[gray > params.white_threshold] == 255)
+    # コマ枠内側の白領域そのものが縮んではいけない（膨張のみで縮小はしていない）
+    assert np.all(panel_mask[panel_gray > params.white_threshold] == 255)
 
     # 楕円境界の少し外側（膨張半径 12px 以内）は無視領域に含まれる
     near_x = _ELLIPSE_CENTER[0] + _ELLIPSE_AXES[0] + 8
@@ -189,3 +215,56 @@ def test_rejects_non_2d_input() -> None:
 
     with pytest.raises(ValueError):
         detect_balloons(color, params)
+
+
+def test_page_background_is_excluded_from_loss_mask() -> None:
+    """ページ背景（画像外周に接する白い連結成分）は損失マスクに含まれない（#15 回帰）。
+
+    コマ枠の外側を取り巻く白いページ背景は、外側輪郭がページ矩形そのものになるため
+    solidity が高く誤判定されやすく、外接矩形も画像全体になるため白充填率も高くなりやすい。
+    ページ端に接する成分を候補から除外する修正により、ページ背景自体は損失マスクに
+    含まれないことを確認する。
+    """
+    gray = _draw_ellipse_with_border(_blank_canvas())
+    params = BalloonParams()
+
+    mask = detect_balloons(gray, params)
+
+    # ページ四隅（コマ枠の外側 = ページ背景）は損失マスクに含まれない
+    assert mask[0, 0] == 0
+    assert mask[0, _SIZE - 1] == 0
+    assert mask[_SIZE - 1, 0] == 0
+    assert mask[_SIZE - 1, _SIZE - 1] == 0
+
+
+def test_realistic_page_loss_mask_does_not_cover_whole_page() -> None:
+    """白背景・コマ枠2つ・フキダシ1つ・ベタ1つを含む現実的なページで、損失マスクが
+    ページ全面を覆わないこと（#15 回帰）。
+
+    レビュー時点の実装では、ページ背景（コマ枠の外側を取り巻く白領域）の外側輪郭が
+    ページ矩形そのものになるため solidity・白充填率のいずれでも 1.0 と誤判定され、
+    損失マスクがページ全面（被覆率 1.0000）を覆っていた。
+    """
+    height, width = 400, 300
+    page = np.full((height, width), _PAGE_BACKGROUND, dtype=np.uint8)
+
+    # コマ枠 1（左上）: 枠線 + 内側の作画領域
+    cv2.rectangle(page, (20, 20), (140, 180), 0, 3)
+    cv2.rectangle(page, (23, 23), (137, 177), _PANEL_FILL, -1)
+
+    # コマ枠 2（右下）: 枠線 + 内側の作画領域
+    cv2.rectangle(page, (160, 200), (280, 380), 0, 3)
+    cv2.rectangle(page, (163, 203), (277, 377), _PANEL_FILL, -1)
+
+    # フキダシ: コマ枠 1 の内側に白楕円（フチあり）
+    cv2.ellipse(page, (80, 90), _ELLIPSE_AXES, 0, 0, 360, 255, -1)
+    cv2.ellipse(page, (80, 90), _ELLIPSE_AXES, 0, 0, 360, 0, 3)
+
+    # ベタ: コマ枠 2 の内側に黒塗り領域
+    cv2.rectangle(page, (180, 300), (260, 360), 0, -1)
+
+    params = BalloonParams()
+    mask = detect_balloons(page, params)
+
+    coverage = float(np.count_nonzero(mask)) / mask.size
+    assert coverage < 0.3, f"loss mask covers {coverage:.4f} of page (expected < 0.3)"

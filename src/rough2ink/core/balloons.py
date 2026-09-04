@@ -66,6 +66,7 @@ def detect_balloons(
                 gray,
                 components,
                 min_area_ratio=params.min_area_ratio,
+                max_area_ratio=params.max_area_ratio,
                 white_threshold=params.white_threshold,
                 white_fill_ratio=params.white_fill_ratio,
             )
@@ -74,6 +75,7 @@ def detect_balloons(
                 gray.shape,
                 components,
                 min_area_ratio=params.min_area_ratio,
+                max_area_ratio=params.max_area_ratio,
                 min_solidity=params.min_solidity,
             )
 
@@ -116,11 +118,23 @@ def _white_connected_components(gray: np.ndarray, white_threshold: int) -> _Comp
     return num_labels, labels, stats
 
 
+def _touches_border(x: int, y: int, w: int, h: int, shape: tuple[int, int]) -> bool:
+    """連結成分の外接矩形が画像の外周に接しているかを判定する。
+
+    実原稿の白ページ背景（コマ枠の外側を取り巻く白領域）は必ず画像の外周まで達する。
+    この判定でそのような成分を候補から除外することで、ページ全体がフキダシの損失
+    マスクとして誤って塗られるのを防ぐ（#15）。
+    """
+    height, width = shape
+    return x <= 0 or y <= 0 or x + w >= width or y + h >= height
+
+
 def _white_fill_mask(
     gray: np.ndarray,
     components: _Components,
     *,
     min_area_ratio: float,
+    max_area_ratio: float,
     white_threshold: int,
     white_fill_ratio: float,
 ) -> np.ndarray:
@@ -129,20 +143,27 @@ def _white_fill_mask(
     連結成分そのもの（定義上 100% 白）ではなく、その **外接矩形** 内での白画素割合を見る。
     こうすることで、フチや文字などわずかに白でない画素が混じっていても許容しつつ、
     外接矩形をそのままマスクとして塗る（過剰に広く取ってよい方針に沿う）。
+
+    ただし、ページ背景（コマ枠の外側を取り巻く白領域）はこの手がかりで拾ってはならない
+    ため、外接矩形が画像の外周に接する成分・`max_area_ratio` を超える成分は候補から除外
+    する（#15）。
     """
     num_labels, labels, stats = components
     total_area = gray.shape[0] * gray.shape[1]
     min_area = max(1.0, total_area * min_area_ratio)
+    max_area = total_area * max_area_ratio
 
     mask = np.zeros(gray.shape, dtype=np.uint8)
     for label_id in range(1, num_labels):
         area = stats[label_id, cv2.CC_STAT_AREA]
-        if area < min_area:
+        if area < min_area or area > max_area:
             continue
         x = stats[label_id, cv2.CC_STAT_LEFT]
         y = stats[label_id, cv2.CC_STAT_TOP]
         w = stats[label_id, cv2.CC_STAT_WIDTH]
         h = stats[label_id, cv2.CC_STAT_HEIGHT]
+        if _touches_border(x, y, w, h, gray.shape):
+            continue
         bbox_region = gray[y : y + h, x : x + w]
         white_ratio = float(np.count_nonzero(bbox_region > white_threshold)) / bbox_region.size
         if white_ratio >= white_fill_ratio:
@@ -155,21 +176,35 @@ def _solidity_mask(
     components: _Components,
     *,
     min_area_ratio: float,
+    max_area_ratio: float,
     min_solidity: float,
 ) -> np.ndarray:
     """手がかり 3: 凸包面積比（solidity）が高い（楕円・角丸の凸形状）連結領域を検出する。
 
     塗るのは連結成分そのものではなく **凸包**。フキダシの縁取り線（連結成分には含まれない
     暗画素）まで含めて覆えるため、白い連結領域だけを塗るより広く取れる。
+
+    solidity は「連結成分の実画素数（`stats` の `CC_STAT_AREA`、穴は含まない）/ 凸包面積」
+    で計算する。`cv2.contourArea(contour)` は RETR_EXTERNAL の外側輪郭が囲む面積であり
+    内部の穴を埋めた値になるため、コマ枠に囲まれた環状のページ背景のような穴だらけの
+    成分でも 1.0 近くと誤判定してしまう（#15）。加えて、外接矩形が画像の外周に接する
+    成分・`max_area_ratio` を超える成分も候補から除外する。
     """
     num_labels, labels, stats = components
     total_area = shape[0] * shape[1]
     min_area = max(1.0, total_area * min_area_ratio)
+    max_area = total_area * max_area_ratio
 
     mask = np.zeros(shape, dtype=np.uint8)
     for label_id in range(1, num_labels):
         area = stats[label_id, cv2.CC_STAT_AREA]
-        if area < min_area:
+        if area < min_area or area > max_area:
+            continue
+        x = stats[label_id, cv2.CC_STAT_LEFT]
+        y = stats[label_id, cv2.CC_STAT_TOP]
+        w = stats[label_id, cv2.CC_STAT_WIDTH]
+        h = stats[label_id, cv2.CC_STAT_HEIGHT]
+        if _touches_border(x, y, w, h, shape):
             continue
         component_mask = (labels == label_id).astype(np.uint8) * 255
         contours, _hierarchy = cv2.findContours(
@@ -178,14 +213,11 @@ def _solidity_mask(
         if not contours:
             continue
         contour = max(contours, key=cv2.contourArea)
-        contour_area = cv2.contourArea(contour)
-        if contour_area <= 0:
-            continue
         hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
         if hull_area <= 0:
             continue
-        solidity = contour_area / hull_area
+        solidity = area / hull_area
         if solidity >= min_solidity:
             cv2.fillConvexPoly(mask, hull, 255)
     return mask
