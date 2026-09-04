@@ -36,6 +36,24 @@ def test_sanitize_preset_name_avoids_reserved_device_names() -> None:
     assert presets.sanitize_preset_name("COM1") == "COM1_"
 
 
+def test_sanitize_preset_name_avoids_reserved_device_names_with_extension() -> None:
+    """Windows の予約デバイス名判定は最初のドットより前の部分に対して行われるため、
+    拡張子が付いていても素通りしてはならない（Review #22）。
+    """
+    assert presets.sanitize_preset_name("CON.txt") == "CON_.txt"
+    assert presets.sanitize_preset_name("nul.json") == "nul_.json"
+    assert presets.sanitize_preset_name("COM1.foo") == "COM1_.foo"
+    # "CON_.txt" の最初のドットより前は "CON_" であり、もう予約名と一致しないことを確認する。
+    stem_after_sanitize = presets.sanitize_preset_name("CON.txt").split(".", 1)[0]
+    assert stem_after_sanitize.upper() not in presets._RESERVED_NAMES
+
+
+def test_sanitize_preset_name_avoids_conin_conout() -> None:
+    """`CONIN$` `CONOUT$` も Windows の予約デバイス名である（Review #22）。"""
+    assert presets.sanitize_preset_name("CONIN$") == "CONIN$_"
+    assert presets.sanitize_preset_name("CONOUT$") == "CONOUT$_"
+
+
 def test_sanitize_preset_name_empty_result_falls_back() -> None:
     assert presets.sanitize_preset_name("   ") == "preset"
     assert presets.sanitize_preset_name("...") == "preset"

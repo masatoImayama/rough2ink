@@ -27,6 +27,8 @@ _RESERVED_NAMES = {
     "PRN",
     "AUX",
     "NUL",
+    "CONIN$",
+    "CONOUT$",
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
@@ -39,15 +41,19 @@ def sanitize_preset_name(name: str) -> str:
 
     - 禁止文字（`<>:"/\\|?*` および制御文字）は `_` に置換する
     - 前後の空白・ドットは取り除く（Windows はこれらを暗黙に無視するため）
-    - 予約デバイス名（`CON` `NUL` 等）は末尾に `_` を付けて回避する
+    - 予約デバイス名（`CON` `NUL` 等）は末尾に `_` を付けて回避する。Windows の予約名判定は
+      **最初のドットより前の部分**に対して行われる（`CON.txt` も `CON` デバイス扱いになる）ため、
+      判定・回避のどちらも「最初のドットより前の部分」を対象にする（拡張子の後ろに `_` を
+      付けるだけでは、それより前の部分が予約名のままなので回避にならない）
     - 結果が空文字列になる場合は `preset` にフォールバックする
     """
     sanitized = _INVALID_CHARS_RE.sub("_", name)
     sanitized = sanitized.strip(" .")
     if not sanitized:
         return _FALLBACK_NAME
-    if sanitized.upper() in _RESERVED_NAMES:
-        sanitized = f"{sanitized}_"
+    stem, sep, rest = sanitized.partition(".")
+    if stem.upper() in _RESERVED_NAMES:
+        sanitized = f"{stem}_{sep}{rest}"
     return sanitized
 
 
