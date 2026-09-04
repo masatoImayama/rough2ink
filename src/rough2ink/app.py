@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from rough2ink.api import routes_ingest
+from rough2ink.api import routes_gt, routes_ingest
 from rough2ink.core.params import AnalysisParams
 
 # src/rough2ink/app.py から見て 2 階層上がプロジェクトルート
@@ -34,11 +34,11 @@ def params_defaults() -> AnalysisParams:
 
 
 app.include_router(routes_ingest.router)
+app.include_router(routes_gt.router)
 
 # 残りのルータは後続タスクで追加していく。
-# from rough2ink.api import routes_analyze, routes_gt, routes_presets, routes_batch
+# from rough2ink.api import routes_analyze, routes_presets, routes_batch
 # app.include_router(routes_analyze.router)
-# app.include_router(routes_gt.router)
 # app.include_router(routes_presets.router)
 # app.include_router(routes_batch.router)
 
