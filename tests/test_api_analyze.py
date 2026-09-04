@@ -18,7 +18,7 @@ from psd_tools import PSDImage
 from psd_tools.api.layers import Group, PixelLayer
 
 from rough2ink.app import app
-from rough2ink.core import gt
+from rough2ink.core import gt, imageio
 from rough2ink.core.panels import detect_panels as core_detect_panels
 from rough2ink.core.params import AnalysisParams, PreviewParams, QualityParams
 
@@ -244,6 +244,47 @@ def test_analyze_returns_404_for_unknown_page(tmp_path: Path, monkeypatch) -> No
     client = TestClient(app)
 
     response = _analyze(client, "does-not-exist", AnalysisParams())
+
+    assert response.status_code == 404
+
+
+# --- パストラバーサル対策（Review #21） ------------------------------------------
+#
+# uvicorn は URL をデコードしてからルーティングするため、バックスラッシュ入りの
+# `page_id` が単一パスセグメントとして届きうる（Windows 上での実測は
+# `tests/test_routes_ingest.py` を参照）。サンドボックス(Linux)ではバックスラッシュは
+# パス区切りとして解釈されないため、あえて**リテラルな名前のディレクトリ**を用意して
+# 「たまたま存在しないから404」ではなく検証で拒否されることを確認する。
+
+
+def test_analyze_returns_404_for_backslash_traversal_page_id_even_if_literal_dir_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    traversal_page_id = "..\\..\\victim"
+    literal_page_dir = tmp_path / "ws" / "pages" / traversal_page_id
+    literal_page_dir.mkdir(parents=True)
+    imageio.write_gray_png(literal_page_dir / "page.png", _panel_grid_page())
+
+    response = _analyze(client, traversal_page_id, AnalysisParams())
+
+    assert response.status_code == 404
+
+
+def test_get_mask_returns_404_for_backslash_traversal_page_id_even_if_literal_dir_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    traversal_page_id = "..\\..\\victim"
+    masks_dir = tmp_path / "ws" / "pages" / traversal_page_id / "masks"
+    masks_dir.mkdir(parents=True)
+    imageio.write_mask_png(masks_dir / "line.png", np.full((10, 10), 255, dtype=np.uint8))
+
+    response = client.get(f"/api/pages/{traversal_page_id}/mask/line")
 
     assert response.status_code == 404
 

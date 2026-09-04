@@ -20,7 +20,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from rough2ink.core import imageio
-from rough2ink.core.config import get_workspace_dir
+from rough2ink.core.config import get_workspace_dir, resolve_page_dir
 from rough2ink.core.loaders import load_image, load_pdf, load_psd
 from rough2ink.core.params import PreviewParams
 from rough2ink.core.types import LayerInfo, PageDocument
@@ -50,7 +50,16 @@ def _pages_dir() -> Path:
 
 
 def _page_dir(page_id: str) -> Path:
-    return _pages_dir() / page_id
+    """`page_id` を検証したうえでページディレクトリを返す（Review #21: パストラバーサル対策）。
+
+    不正な `page_id`（内部生成の uuid hex とホワイトリスト外の文字を含む値）は
+    `HTTPException(404)` に変換する。存在しないページと同じ扱いにすることで、
+    攻撃者に「入力が弾かれた」ことを示さない。
+    """
+    try:
+        return resolve_page_dir(page_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=f"page not found: {page_id!r}") from exc
 
 
 def _uploads_dir() -> Path:

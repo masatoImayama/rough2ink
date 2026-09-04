@@ -76,6 +76,48 @@ def test_get_preview_returns_404_for_unknown_page(tmp_path: Path, monkeypatch) -
     assert response.status_code == 404
 
 
+# --- パストラバーサル対策（Review #21） ------------------------------------------
+#
+# uvicorn は URL をデコードしてからルーティングするため、`..%5C..%5C..%5CUsers%5Cvictim`
+# のようなバックスラッシュ入りの値が単一パスセグメントとして `page_id` に一致しうる
+# （Windows 上で `workspace\pages\..\..\..\Users\victim\...` に解決されるとレビュアーが実測）。
+#
+# サンドボックス(Linux)ではバックスラッシュはパス区切りとして解釈されないため、
+# 「該当ディレクトリが存在しないから404」という偶然の一致では検証にならない。
+# そのため、あえて `..\\..\\victim` という**リテラルな名前のディレクトリ**を
+# ワークスペース配下に作って中身を用意したうえで、それでもホワイトリスト検証
+# （`core.config.resolve_page_dir`）によって拒否され 404 になることを確認する。
+
+
+def test_get_preview_returns_404_for_backslash_traversal_page_id_even_if_literal_dir_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    traversal_page_id = "..\\..\\victim"
+    literal_page_dir = tmp_path / "ws" / "pages" / traversal_page_id
+    literal_page_dir.mkdir(parents=True)
+    (literal_page_dir / "preview.png").write_bytes(b"secret-bytes")
+
+    response = client.get(f"/api/pages/{traversal_page_id}/preview")
+
+    assert response.status_code == 404
+    assert response.content != b"secret-bytes"
+
+
+def test_get_layers_returns_404_for_backslash_traversal_page_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    traversal_page_id = "..\\..\\victim"
+    response = client.get(f"/api/pages/{traversal_page_id}/layers")
+
+    assert response.status_code == 404
+
+
 def test_ingest_rejects_unsupported_file_type(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
     client = TestClient(app)

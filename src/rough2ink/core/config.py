@@ -10,11 +10,19 @@ Windows ローカル実行を前提とし、パスは常に `pathlib.Path` で�
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 _ENV_PROJECT_ROOT = "ROUGH2INK_PROJECT_ROOT"
 _ENV_WORKSPACE_DIR = "ROUGH2INK_WORKSPACE_DIR"
 _ENV_OUT_DIR = "ROUGH2INK_OUT_DIR"
+
+# `page_id` として許可する文字集合（英数字・`_`・`.`・`-` のみ）。
+# uvicorn は URL をデコードしてからルーティングするため、パスパラメータであっても
+# バックスラッシュ入りの値（`..%5C..%5C..` 等）が単一セグメントとして一致しうる
+# （Review #21: Windows 上で `workspace\pages\..\..\..\Users\victim\...` に解決されることを実測）。
+# `/` はスラッシュとして FastAPI のルーティングで弾かれるが、`\` はこの正規表現で弾く。
+_PAGE_ID_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 
 
 def get_project_root() -> Path:
@@ -58,3 +66,28 @@ def get_gt_dir(*, create: bool = True) -> Path:
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def resolve_page_dir(page_id: str) -> Path:
+    """URL パスパラメータ `page_id` を検証したうえで `workspace/pages/<page_id>/` を返す。
+
+    パストラバーサル対策として二重に検証する（Review #21）:
+    - ホワイトリスト（英数字・`_`・`.`・`-` のみ）に一致しない値を拒否する。
+      `page_id` はスラッシュを含まない前提の値だが、URL デコード後にバックスラッシュが
+      入っていると Windows 上ではパス区切りとして解釈されてしまうため、この時点で弾く。
+    - 念のため、解決後のパスが `workspace/pages/` の配下であることも `Path.is_relative_to`
+      で確認する。
+
+    不正な `page_id` には `ValueError` を送出する。呼び出し側（各 API ルート）はこれを
+    捕捉して 404 に変換すること（存在しないページと区別しない ── 攻撃者に「弾かれた」
+    という情報を与えないため）。
+    """
+    if not _PAGE_ID_PATTERN.fullmatch(page_id):
+        raise ValueError(f"invalid page_id: {page_id!r}")
+
+    pages_dir = (get_workspace_dir(create=True) / "pages").resolve()
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    page_dir = (pages_dir / page_id).resolve()
+    if not page_dir.is_relative_to(pages_dir):
+        raise ValueError(f"invalid page_id: {page_id!r}")
+    return page_dir

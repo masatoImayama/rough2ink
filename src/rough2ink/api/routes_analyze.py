@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from rough2ink.core import imageio
 from rough2ink.core.balloons import detect_balloons
-from rough2ink.core.config import get_workspace_dir
+from rough2ink.core.config import get_workspace_dir, resolve_page_dir
 from rough2ink.core.decompose import decompose
 from rough2ink.core.metrics import compute_page_decompose_metrics
 from rough2ink.core.panels import detect_panels
@@ -76,7 +76,14 @@ def _pages_dir() -> Path:
 
 
 def _page_dir(page_id: str) -> Path:
-    return _pages_dir() / page_id
+    """`page_id` を検証したうえでページディレクトリを返す（Review #21: パストラバーサル対策）。
+
+    不正な `page_id` は `HTTPException(404)` に変換する（存在しないページと同じ扱い）。
+    """
+    try:
+        return resolve_page_dir(page_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=f"page not found: {page_id!r}") from exc
 
 
 def _masks_dir(page_id: str) -> Path:
