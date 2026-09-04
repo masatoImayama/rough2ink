@@ -280,7 +280,12 @@ def test_run_batch_role_absent_in_both_is_excluded_from_macro_average(tmp_path: 
     params = AnalysisParams(quality=QualityParams(min_short_side=1))
 
     run_batch(input_dir, out_dir, params)  # 1回目: workspace/pages/art/meta.json を永続化
-    gt.save_mapping("art", {"Group1/FillLayer": "fill"})  # line/tone は未割当のまま
+
+    # GT マッピングのキーは `LayerInfo.id`（同名レイヤーがあっても衝突しない、#20）。
+    fill_layer_id = next(
+        layer.id for layer in load_psd(psd_path).layers if layer.path == "Group1/FillLayer"
+    )
+    gt.save_mapping("art", {fill_layer_id: "fill"})  # line/tone は未割当のまま
     report = run_batch(input_dir, out_dir, params)  # 2回目: metrics.json が書かれる
 
     metrics = json.loads((out_dir / "art" / "metrics.json").read_text(encoding="utf-8"))
