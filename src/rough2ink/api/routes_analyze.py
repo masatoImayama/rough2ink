@@ -10,6 +10,12 @@
 へ永続化し（後続のバッチ書き出し #12 で再利用する）、ブラウザへは
 `GET /api/pages/{page_id}/mask/{kind}` の個別エンドポイントからプレビュー解像度で返す。
 
+プレビュー倍率（`preview_width`/`preview_height` およびコマポリゴンのスケール）の出所は
+常に `PreviewParams()` の既定値で、`preview.png`（取り込み時、`routes_ingest.py`）・
+`GET /mask/{kind}` と同一基準に統一している。`params.preview.max_long_side`（リクエスト側）は
+解析経路の座標系計算には使わない（Review #24: プレビュー座標系の基準が2系統に分かれ、
+プリセットの `preview` セクションを手編集するとコマポリゴンだけが静かにずれていた）。
+
 GT（#7, #8）が用意されている場合、`workspace/gt/<page_id>.json` に役割マッピングが
 保存されていれば `metrics` に IoU/Precision/Recall/F1（役割ごと）を算出して返す
 （`core.metrics.compute_page_decompose_metrics` に集約された規則: 評価対象から `text` 領域と
@@ -152,7 +158,13 @@ def analyze_page(
     for kind in _MASK_KINDS:
         imageio.write_mask_png(masks_dir / f"{kind}.png", masks[kind])
 
-    preview = imageio.make_preview(gray, params.preview.max_long_side)
+    # プレビュー倍率の出所を1つに統一する（Review #24）。`preview.png`（取り込み時、
+    # routes_ingest.py）も `GET /mask/{kind}` の縮小（下の get_mask）も常に
+    # `PreviewParams()` の既定値で生成されるため、ここも `params.preview.max_long_side`
+    # ではなく同じ既定値を使う。`params.preview` を解析経路の座標系計算に使うと、
+    # プリセットに含まれる `preview` セクションを手編集しただけでコマポリゴンだけが
+    # 別スケールで描画され、エラーにならず静かにずれる（実測済み）。
+    preview = imageio.make_preview(gray, PreviewParams().max_long_side)
     preview_height, preview_width = preview.shape[:2]
     scale_x = preview_width / width
     scale_y = preview_height / height
