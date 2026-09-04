@@ -18,7 +18,7 @@ from psd_tools import PSDImage
 from psd_tools.api.layers import Group, PixelLayer
 
 from rough2ink.app import app
-from rough2ink.core import gt
+from rough2ink.core import gt, imageio
 from rough2ink.core.panels import detect_panels as core_detect_panels
 from rough2ink.core.params import AnalysisParams, PreviewParams, QualityParams
 
@@ -157,6 +157,53 @@ def test_analyze_scales_panel_polygons_to_preview_coordinates(
     assert actual_polygon == expected_polygon
 
 
+def test_analyze_preview_scale_ignores_params_preview_and_matches_preview_png(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Review #24: `preview.png`/`GET /mask/{kind}` は常に `PreviewParams()` の既定値
+    (1600) で生成される。`analyze()` のプレビュー寸法・コマポリゴンのスケールも同じ
+    基準を使い、リクエストの `params.preview.max_long_side` を変えても座標系がずれない
+    こと（`preview_width`/`preview_height` が `preview.png` の実サイズと一致すること）を
+    固定する。"""
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    height, width = 2000, 800
+    page = np.full((height, width), 255, dtype=np.uint8)
+    _draw_border(page, 40, 40, width - 40, height - 40)
+    page_id = _ingest_page(client, page)
+
+    # 手編集したプリセット相当: preview.max_long_side をスライダーに露出していない値へ
+    # 大きくずらす。これが解析経路の座標系計算に影響しないことを確認する。
+    params = AnalysisParams(preview=PreviewParams(max_long_side=400))
+    response = _analyze(client, page_id, params)
+    assert response.status_code == 200
+    body = response.json()
+
+    # preview.png（取り込み時に PreviewParams() の既定値=1600 で生成済み）と
+    # 同じ寸法になっていること。params.preview.max_long_side(400) には従わない。
+    preview_response = client.get(f"/api/pages/{page_id}/preview")
+    assert preview_response.status_code == 200
+    preview_array = _decode_png(preview_response.content)
+    preview_png_height, preview_png_width = preview_array.shape[:2]
+
+    assert body["preview_width"] == preview_png_width
+    assert body["preview_height"] == preview_png_height
+    assert body["preview_width"] != 400
+    assert max(body["preview_width"], body["preview_height"]) == PreviewParams().max_long_side
+
+    # コマポリゴンも同じ倍率で計算されていること。
+    scale_x = body["preview_width"] / width
+    scale_y = body["preview_height"] / height
+    full_res_panels = core_detect_panels(page, params.panel)
+    assert len(full_res_panels) == 1
+    expected_polygon = [
+        (round(x * scale_x, 3), round(y * scale_y, 3)) for x, y in full_res_panels[0].polygon
+    ]
+    actual_polygon = [(round(x, 3), round(y, 3)) for x, y in body["panels"][0]["polygon"]]
+    assert actual_polygon == expected_polygon
+
+
 def test_analyze_reflects_changed_params(tmp_path: Path, monkeypatch) -> None:
     """パラメータを変えて再解析すると結果が変わること。"""
     monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
@@ -244,6 +291,47 @@ def test_analyze_returns_404_for_unknown_page(tmp_path: Path, monkeypatch) -> No
     client = TestClient(app)
 
     response = _analyze(client, "does-not-exist", AnalysisParams())
+
+    assert response.status_code == 404
+
+
+# --- パストラバーサル対策（Review #21） ------------------------------------------
+#
+# uvicorn は URL をデコードしてからルーティングするため、バックスラッシュ入りの
+# `page_id` が単一パスセグメントとして届きうる（Windows 上での実測は
+# `tests/test_routes_ingest.py` を参照）。サンドボックス(Linux)ではバックスラッシュは
+# パス区切りとして解釈されないため、あえて**リテラルな名前のディレクトリ**を用意して
+# 「たまたま存在しないから404」ではなく検証で拒否されることを確認する。
+
+
+def test_analyze_returns_404_for_backslash_traversal_page_id_even_if_literal_dir_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    traversal_page_id = "..\\..\\victim"
+    literal_page_dir = tmp_path / "ws" / "pages" / traversal_page_id
+    literal_page_dir.mkdir(parents=True)
+    imageio.write_gray_png(literal_page_dir / "page.png", _panel_grid_page())
+
+    response = _analyze(client, traversal_page_id, AnalysisParams())
+
+    assert response.status_code == 404
+
+
+def test_get_mask_returns_404_for_backslash_traversal_page_id_even_if_literal_dir_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    traversal_page_id = "..\\..\\victim"
+    masks_dir = tmp_path / "ws" / "pages" / traversal_page_id / "masks"
+    masks_dir.mkdir(parents=True)
+    imageio.write_mask_png(masks_dir / "line.png", np.full((10, 10), 255, dtype=np.uint8))
+
+    response = client.get(f"/api/pages/{traversal_page_id}/mask/line")
 
     assert response.status_code == 404
 

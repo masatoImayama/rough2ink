@@ -20,7 +20,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from rough2ink.core import imageio
-from rough2ink.core.config import get_workspace_dir
+from rough2ink.core.config import get_workspace_dir, resolve_page_dir
 from rough2ink.core.loaders import load_image, load_pdf, load_psd
 from rough2ink.core.params import PreviewParams
 from rough2ink.core.types import LayerInfo, PageDocument
@@ -50,7 +50,16 @@ def _pages_dir() -> Path:
 
 
 def _page_dir(page_id: str) -> Path:
-    return _pages_dir() / page_id
+    """`page_id` を検証したうえでページディレクトリを返す（Review #21: パストラバーサル対策）。
+
+    不正な `page_id`（内部生成の uuid hex とホワイトリスト外の文字を含む値）は
+    `HTTPException(404)` に変換する。存在しないページと同じ扱いにすることで、
+    攻撃者に「入力が弾かれた」ことを示さない。
+    """
+    try:
+        return resolve_page_dir(page_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=f"page not found: {page_id!r}") from exc
 
 
 def _uploads_dir() -> Path:
@@ -129,9 +138,18 @@ async def ingest(file: UploadFile = File(...)) -> list[PageSummary]:
 
 @router.get("/pages", response_model=list[PageSummary])
 def list_pages() -> list[PageSummary]:
-    """永続化済みの全ページを一覧で返す。"""
+    """永続化済みの全ページを一覧で返す。
+
+    `page.png`（原寸画像）を持つページのみを対象にする。バッチ処理（`core.batch`,
+    #12）は GT マッピング参照のため `meta.json` だけを `workspace/pages/<page_id>/` に
+    書き出すことがあり、`page.png` / `preview.png` を持たないそのようなページを一覧に
+    出すと、選択しても `GET /preview` `POST /analyze` が 404 になる
+    （Review #23: 一覧に出るが選択すると404で無反応になる）。
+    """
     summaries: list[PageSummary] = []
     for meta_path in sorted(_pages_dir().glob("*/meta.json")):
+        if not (meta_path.parent / "page.png").is_file():
+            continue
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         summaries.append(
             PageSummary(

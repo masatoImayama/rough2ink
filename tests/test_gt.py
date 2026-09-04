@@ -323,3 +323,33 @@ def test_build_gt_masks_resolves_duplicate_layer_names_by_id_not_by_first_match(
 
     assert masks["line"][16, 16] == 255
     assert masks["fill"][16, 16] == 0
+
+
+# --- パストラバーサル対策（Review #21） ------------------------------------------
+#
+# `routes_gt.py` は `page_id` を自分ではパス結合しない（`core.gt` の内部関数に委ねる）が、
+# レビューで同種の欠落が指摘されている。ここでは `core.config.resolve_page_dir` による
+# ホワイトリスト検証が `core.gt` を呼ぶ前段で 404 に変換することだけを確認する
+# （マッピングの中身・キー形式には触れない）。
+
+
+def test_get_gt_mapping_returns_404_for_backslash_traversal_page_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    response = client.get("/api/pages/..\\..\\victim/gt")
+
+    assert response.status_code == 404
+
+
+def test_put_gt_mapping_returns_404_for_backslash_traversal_page_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    response = client.put("/api/pages/..\\..\\victim/gt", json={"mapping": {}})
+
+    assert response.status_code == 404

@@ -146,6 +146,37 @@ def test_run_batch_writes_expected_output_layout(tmp_path: Path, monkeypatch) ->
     assert "## コマ分割" in report_md
 
 
+def test_run_batch_page_does_not_appear_in_list_pages(tmp_path: Path, monkeypatch) -> None:
+    """Review #23: `_persist_workspace_meta()` は `meta.json` だけを書き、`page.png` /
+    `preview.png` を書かない。`list_pages()`（`routes_ingest.py`）が `meta.json` の
+    存在だけで一覧に出すと、バッチ処理したページが UI に現れるのに選ぶと 404 になる。
+    実体（`page.png`）を持たないページは一覧に出ないことを固定する。"""
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    input_dir = tmp_path / "in"
+    input_dir.mkdir()
+    out_dir = tmp_path / "out"
+
+    _write_png(input_dir / "page_a.png", _panel_grid_page())
+
+    params = AnalysisParams(quality=_PASSABLE_QUALITY)
+    report = run_batch(input_dir, out_dir, params)
+    assert report["included_count"] == 1
+
+    # バッチはワークスペースに meta.json のみを永続化し、page.png は置かない。
+    page_dir = tmp_path / "ws" / "pages" / "page_a"
+    assert (page_dir / "meta.json").is_file()
+    assert not (page_dir / "page.png").is_file()
+
+    client = TestClient(app)
+    listed = client.get("/api/pages")
+    assert listed.status_code == 200
+    assert "page_a" not in {p["page_id"] for p in listed.json()}
+
+    # 一覧に出ないだけでなく、選択しようとしても 404 で一貫していること。
+    preview_response = client.get("/api/pages/page_a/preview")
+    assert preview_response.status_code == 404
+
+
 def test_run_batch_multiple_pages_aggregate_panel_metrics(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
     input_dir = tmp_path / "in"

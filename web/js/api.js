@@ -69,13 +69,19 @@ export async function putGTMapping(pageId, mapping) {
   return res.json();
 }
 
-/** `POST /api/pages/{page_id}/analyze`。`AnalysisParams` を渡して解析結果を得る。 */
-export async function analyzePage(pageId, params) {
+/**
+ * `POST /api/pages/{page_id}/analyze`。`AnalysisParams` を渡して解析結果を得る。
+ *
+ * `signal`（`AbortController.signal`）を渡すと、呼び出し元が先行リクエストを中断できる
+ * （Review #26: 再解析の並行実行対策として `web/js/app.js` の `reanalyze()` が使う）。
+ */
+export async function analyzePage(pageId, params, signal) {
   const res = await handleResponse(
     await fetch(`${BASE}/pages/${encodeURIComponent(pageId)}/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params),
+      signal,
     })
   );
   return res.json();

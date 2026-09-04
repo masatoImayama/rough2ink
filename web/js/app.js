@@ -23,6 +23,12 @@ const state = {
 
 let overlay;
 let debouncedReanalyze;
+// 再解析の世代番号（Review #26）。デバウンス後に発火した複数の analyze/mask 取得が
+// 並行して完了しうるため、完了時にこの値と比較し、後から発火したのに先に返ってきた
+// 古いリクエストの結果で新しい表示を上書きしないようにする。
+let latestReanalyzeSeq = 0;
+// 直前の analyze リクエストを中断するための AbortController（可能な場合のみ使う）。
+let reanalyzeAbortController = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -90,13 +96,20 @@ async function selectPage(pageId) {
   state.pageId = pageId;
   byId("page-status").textContent = `選択中: ${pageId}`;
 
-  const layers = await api.getLayers(pageId);
-  await renderLayerMapping(byId("layer-mapping"), pageId, layers, byId("gt-status"));
+  // Review #23: バッチ処理した meta.json のみのページ（page.png/preview.png を持たない）
+  // が一覧に出ることがあり、選ぶと各 API が 404 を返す。ここで捕捉せず投げっぱなしにすると
+  // 未処理の Promise 拒否になり画面に何も出ない（呼び出し元のクリックハンドラは await しない）。
+  try {
+    const layers = await api.getLayers(pageId);
+    await renderLayerMapping(byId("layer-mapping"), pageId, layers, byId("gt-status"));
 
-  await overlay.loadBase(api.previewUrl(pageId));
-  overlay.redraw();
+    await overlay.loadBase(api.previewUrl(pageId));
+    overlay.redraw();
 
-  await reanalyze();
+    await reanalyze();
+  } catch (err) {
+    byId("page-status").textContent = `ページの読み込みに失敗しました: ${err.message}`;
+  }
 }
 
 async function applyPresetParams(params) {
@@ -105,16 +118,34 @@ async function applyPresetParams(params) {
   await reanalyze();
 }
 
+/**
+ * パラメータを送って再解析する。400ms デバウンス後に発火するが、発火済みリクエストの
+ * キャンセル・順序保証は無いため、原寸 5000px 級の解析が数秒かかる間にスライダー操作で
+ * 解析 A・B が並行しうる（Review #26）。世代番号 `seq` で「自分より新しいリクエストが
+ * 既に発火しているか」を判定し、古い結果で表示を上書きしないようにする。加えて、
+ * 直前の analyze リクエストは `AbortController` で中断する（可能な経路のみ。マスク画像
+ * 自体は `<img>` 読み込みのため中断できないが、`seq` 比較で結果は捨てる）。
+ */
 async function reanalyze() {
   if (!state.pageId) return;
 
+  const seq = ++latestReanalyzeSeq;
+  if (reanalyzeAbortController) {
+    reanalyzeAbortController.abort();
+  }
+  const controller = new AbortController();
+  reanalyzeAbortController = controller;
+
   byId("analysis-status").textContent = "解析中...";
   try {
-    const result = await api.analyzePage(state.pageId, state.params);
+    const result = await api.analyzePage(state.pageId, state.params, controller.signal);
+    if (seq !== latestReanalyzeSeq) return; // 追い越された。この結果は表示に反映しない。
 
     await Promise.all(
       RASTER_MASK_KINDS.map((kind) => overlay.loadMask(kind, api.maskUrl(state.pageId, kind)))
     );
+    if (seq !== latestReanalyzeSeq) return; // マスク読み込み中に後続が発火した場合も同様に捨てる。
+
     overlay.setPanels(result.panels);
     overlay.redraw();
 
@@ -124,6 +155,7 @@ async function reanalyze() {
 
     byId("analysis-status").textContent = "解析完了。";
   } catch (err) {
+    if (err.name === "AbortError" || seq !== latestReanalyzeSeq) return; // 中断・追い越しはエラー表示しない。
     byId("analysis-status").textContent = `解析に失敗しました: ${err.message}`;
   }
 }
