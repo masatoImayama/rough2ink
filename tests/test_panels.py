@@ -209,19 +209,23 @@ def test_portrait_page_at_realistic_scale_does_not_flag_spread() -> None:
         assert "spread" not in panel.flags
 
 
-def test_detect_panels_counts_synthetic_grid_at_realistic_page_scale() -> None:
+@pytest.mark.parametrize("thickness", [3, 5, 8, 12])
+def test_detect_panels_counts_synthetic_grid_at_realistic_page_scale(thickness: int) -> None:
     """1414x1000（A4/B4相当）の縦長ページに描いた 2x2 グリッドで、4コマ全てが検出されること
-    （Review #17）。
+    （Review #17 / Review #27）。
 
     旧実装はモルフォロジー勾配が太い枠線を2本の細いレールに分解してしまい、ハフ変換の
-    投票が不足して辺を取りこぼす（4コマ中3コマしか検出できない）ことがあった。しかも
-    `unclosed` フラグも立たず無言で欠落するため、この規模のテストを追加しないと
-    検出不能な状態のまま気づけない。
+    投票が不足して辺を取りこぼす（4コマ中3コマ、太さによっては2コマしか検出できない）
+    ことがあった。しかも `unclosed` フラグも立たず無言で欠落するため、この規模のテストを
+    追加しないと検出不能な状態のまま気づけない。
+
+    枠線太さは 3px（既定値）だけでは旧実装でも通ってしまい欠陥を再現しないため
+    （Review #27）、B4原稿の標準的な枠線太さである 5px 以上を含む複数の太さで検証する。
     """
     page = _blank_page(1414, 1000)  # h=1414, w=1000 (A4/B4 相当の縦長ページ)
     cells = [(40, 40, 480, 680), (520, 40, 960, 680), (40, 720, 480, 1360), (520, 720, 960, 1360)]
     for x1, y1, x2, y2 in cells:
-        _draw_border(page, x1, y1, x2, y2)
+        _draw_border(page, x1, y1, x2, y2, thickness=thickness)
 
     panels = detect_panels(page, PanelParams())
 
