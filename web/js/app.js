@@ -194,9 +194,9 @@ function renderPanelMetrics(panels) {
 }
 
 /**
- * GT との IoU/F1 は GT がある場合のみサーバから返る想定
- * (`AnalysisResult.metrics`, src/rough2ink/api/routes_analyze.py)。
- * 未接続の間は常に null なので、その場合は明示的にその旨を表示する。
+ * GT との IoU/F1 は `workspace/gt/<page_id>.json` に役割マッピングが保存されている
+ * 場合のみサーバから返る (`AnalysisResult.metrics`, src/rough2ink/api/routes_analyze.py)。
+ * マッピング未保存のページでは常に null なので、その場合は明示的にその旨を表示する。
  */
 function renderGTMetrics(metrics) {
   const el = byId("gt-metrics");
@@ -208,7 +208,7 @@ function renderGTMetrics(metrics) {
 
   if (!metrics) {
     const p = document.createElement("p");
-    p.textContent = "このページの GT 指標は利用できません（GT マッピング未保存、またはサーバ側の算出が未接続）。";
+    p.textContent = "このページの GT 指標は利用できません（GT マッピング未保存）。";
     el.appendChild(p);
     return;
   }

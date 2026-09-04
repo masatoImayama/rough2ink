@@ -11,11 +11,16 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
+from psd_tools import PSDImage
+from psd_tools.api.layers import Group, PixelLayer
 
 from rough2ink.app import app
+from rough2ink.core import gt
 from rough2ink.core.panels import detect_panels as core_detect_panels
-from rough2ink.core.params import AnalysisParams, PreviewParams
+from rough2ink.core.params import AnalysisParams, PreviewParams, QualityParams
 
 
 def _draw_border(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, thickness: int = 3) -> None:
@@ -84,7 +89,7 @@ def test_analyze_returns_quality_panels_and_mask_urls(tmp_path: Path, monkeypatc
     for kind in ("line", "fill", "tone", "balloon"):
         assert body["mask_urls"][kind] == f"/api/pages/{page_id}/mask/{kind}"
 
-    # GT 指標は #9 の責務。未接続の間は常に None（受け口のみ用意する）。
+    # GT マッピング未保存のページでは metrics は None。
     assert body["metrics"] is None
 
 
@@ -241,3 +246,56 @@ def test_analyze_returns_404_for_unknown_page(tmp_path: Path, monkeypatch) -> No
     response = _analyze(client, "does-not-exist", AnalysisParams())
 
     assert response.status_code == 404
+
+
+# --- metrics: GT マッピングがある場合に IoU/F1 を返す（#8 の gt/metrics との接続） -------
+
+
+def _make_metrics_psd(path: Path) -> None:
+    """全面が不透明黒の Fill レイヤー 1 枚だけを持つ PSD（GT 指標算出の疎通確認用）。
+
+    `tests/test_batch.py::_make_metrics_psd` と同じ構成
+    （`core.batch._compute_decompose_metrics` と揃える契約の検証のため）。
+    """
+    psd = PSDImage.new("RGBA", (60, 60), color=(255, 255, 255, 255))
+    group = Group.new(psd, "Group1")
+    rgba = np.zeros((60, 60, 4), dtype=np.uint8)
+    rgba[:, :, 3] = 255  # 不透明黒
+    PixelLayer.frompil(Image.fromarray(rgba, mode="RGBA"), group, "FillLayer", top=0, left=0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    psd.save(str(path))
+
+
+def test_analyze_returns_metrics_when_gt_mapping_exists(tmp_path: Path, monkeypatch) -> None:
+    """GT マッピング保存済みの PSD ページでは `metrics` に IoU/F1 が入ること（routes_analyze <-> core.gt/core.metrics の接続確認）。"""
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    psd_path = tmp_path / "art.psd"
+    _make_metrics_psd(psd_path)
+
+    with psd_path.open("rb") as f:
+        response = client.post(
+            "/api/ingest", files={"file": ("art.psd", f, "application/octet-stream")}
+        )
+    assert response.status_code == 200
+    page_id = response.json()[0]["page_id"]
+
+    # マッピング未保存の間は metrics は None（データが繋がっているだけで無条件に埋まらないこと）。
+    # フィクスチャは 60x60 と小さいため、専用の緩い品質閾値を使う（tests/test_batch.py と同じ）。
+    params = AnalysisParams(quality=QualityParams(min_short_side=1))
+    before = _analyze(client, page_id, params)
+    assert before.status_code == 200
+    assert before.json()["metrics"] is None
+
+    gt.save_mapping(page_id, {"Group1/FillLayer": "fill"})
+
+    after = _analyze(client, page_id, params)
+    assert after.status_code == 200
+    metrics = after.json()["metrics"]
+    assert metrics is not None
+    assert "fill" in metrics
+    assert metrics["fill"]["iou"] == pytest.approx(1.0)
+    assert metrics["fill"]["precision"] == pytest.approx(1.0)
+    assert metrics["fill"]["recall"] == pytest.approx(1.0)
+    assert metrics["fill"]["f1"] == pytest.approx(1.0)

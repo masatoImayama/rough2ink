@@ -10,9 +10,10 @@
 へ永続化し（後続のバッチ書き出し #12 で再利用する）、ブラウザへは
 `GET /api/pages/{page_id}/mask/{kind}` の個別エンドポイントからプレビュー解像度で返す。
 
-GT（#7, #8）が用意されている場合の指標（IoU/F1 等）算出は #9 の責務。ここでは
-`metrics` フィールドを受け口として用意するだけで、実際の算出は接続しない
-（GT が無い/未接続の間は常に `None`）。
+GT（#7, #8）が用意されている場合、`workspace/gt/<page_id>.json` に役割マッピングが
+保存されていれば `metrics` に IoU/Precision/Recall/F1（役割ごと）を算出して返す
+（`core.batch._compute_decompose_metrics` と同じ規則: 評価対象から `text` 領域と
+フキダシ損失マスクを除外する）。マッピング未保存のページでは常に `None`。
 """
 
 from __future__ import annotations
@@ -21,14 +22,17 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from rough2ink.core import gt as gt_module
 from rough2ink.core import imageio
 from rough2ink.core.balloons import detect_balloons
-from rough2ink.core.config import get_workspace_dir
+from rough2ink.core.config import get_gt_dir, get_workspace_dir
 from rough2ink.core.decompose import decompose
+from rough2ink.core.metrics import decompose_metrics
 from rough2ink.core.panels import detect_panels
 from rough2ink.core.params import AnalysisParams, PreviewParams
 from rough2ink.core.quality import evaluate_quality
@@ -63,7 +67,8 @@ class AnalysisResult(BaseModel):
     preview_width: int
     preview_height: int
     mask_urls: MaskUrls
-    # GT がある場合の指標（#9 の責務）。未接続の間は常に None。
+    # GT マッピング（`workspace/gt/<page_id>.json`）が保存されている場合のみ算出する。
+    # `{role: {"iou": ..., "precision": ..., "recall": ..., "f1": ...}}`。未保存なら None。
     metrics: dict[str, Any] | None = None
 
 
@@ -119,6 +124,26 @@ def _scale_bbox(bbox: BBox | None, scale_x: float, scale_y: float) -> BBox | Non
     )
 
 
+def _compute_metrics(
+    page_id: str, masks: dict[str, np.ndarray], balloon_mask: np.ndarray
+) -> dict | None:
+    """GT マッピング（`workspace/gt/<page_id>.json`）が存在する場合のみ分解器指標を算出する。
+
+    `core.batch._compute_decompose_metrics` と同じ規則（評価対象から `text` 領域と
+    フキダシ損失マスクを除外する）。マッピング未保存、または GT マスク生成に必要な
+    元 PSD が見つからない等の場合は `None` を返す（従来どおり）。
+    """
+    gt_path = get_gt_dir(create=False) / f"{page_id}.json"
+    if not gt_path.is_file():
+        return None
+    try:
+        gt_masks = gt_module.build_gt_masks(page_id)
+    except (gt_module.PageNotFoundError, gt_module.GTMappingError):
+        return None
+    exclude_mask = (((gt_masks["text"] > 0) | (balloon_mask > 0)).astype(np.uint8)) * 255
+    return decompose_metrics(masks, gt_masks, exclude_mask=exclude_mask)
+
+
 @router.post("/pages/{page_id}/analyze", response_model=AnalysisResult)
 def analyze_page(
     page_id: str,
@@ -131,9 +156,11 @@ def analyze_page(
     quality = evaluate_quality(gray, params.quality)
     masks = decompose(gray, params)
     panels = detect_panels(gray, params.panel)
-    masks["balloon"] = detect_balloons(
+    balloon_mask = detect_balloons(
         gray, params.balloon, text_rects=_load_text_rects(page_id) or None
     )
+    masks["balloon"] = balloon_mask
+    metrics = _compute_metrics(page_id, masks, balloon_mask)
 
     masks_dir = _masks_dir(page_id)
     for kind in _MASK_KINDS:
@@ -163,7 +190,7 @@ def analyze_page(
         preview_width=preview_width,
         preview_height=preview_height,
         mask_urls=mask_urls,
-        metrics=None,
+        metrics=metrics,
     )
 
 
