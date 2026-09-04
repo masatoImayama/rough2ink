@@ -52,8 +52,10 @@ def _mapping_path(page_id: str) -> Path:
 
 
 def save_mapping(page_id: str, mapping: dict[str, LayerRole]) -> dict[str, LayerRole]:
-    """役割マッピング `{layer_path: role}` を `workspace/gt/<page_id>.json` に保存する。
+    """役割マッピング `{layer_id: role}` を `workspace/gt/<page_id>.json` に保存する。
 
+    キーは `LayerInfo.id`（`lid<layer_id>` / `idx<n>`）。`LayerInfo.path` は同名レイヤーが
+    あると衝突しうるため使わない（#20）。
     未知の `page_id`（`workspace/pages/<page_id>/meta.json` が無い）は `PageNotFoundError`。
     """
     _load_meta(page_id)  # ページの存在確認のみ（内容は使わない）
@@ -94,21 +96,21 @@ def build_gt_masks(page_id: str) -> dict[str, np.ndarray]:
     if not source_path.is_file():
         raise GTMappingError(f"source PSD not found for page {page_id!r}: {source_path}")
 
-    layer_paths_by_role: dict[str, list[str]] = {}
-    for layer_path, role in mapping.items():
-        layer_paths_by_role.setdefault(role, []).append(layer_path)
+    layer_ids_by_role: dict[str, list[str]] = {}
+    for layer_id, role in mapping.items():
+        layer_ids_by_role.setdefault(role, []).append(layer_id)
 
     psd = PSDImage.open(str(source_path))
     canvases: dict[str, np.ndarray] = {
         role: np.zeros((height, width), dtype=bool) for role in (*_MASK_ROLES, "text")
     }
 
-    for role, layer_paths in layer_paths_by_role.items():
+    for role, layer_ids in layer_ids_by_role.items():
         if role not in canvases:  # "ignore" および未知の役割は完全に無視する
             continue
         canvas = canvases[role]
-        for layer_path in layer_paths:
-            _paint_opaque_pixels(psd, layer_path, canvas)
+        for layer_id in layer_ids:
+            _paint_opaque_pixels(psd, layer_id, canvas)
 
     fill = canvases["fill"]
     tone = canvases["tone"] & ~fill
@@ -126,12 +128,15 @@ def _to_mask(boolean: np.ndarray) -> np.ndarray:
     return np.where(boolean, _MASK_ON, _MASK_OFF)
 
 
-def _paint_opaque_pixels(psd: PSDImage, layer_path: str, canvas: np.ndarray) -> None:
-    """`layer_path` の不透明画素を、ページ原寸の `canvas`（bool, 論理和で更新）へ書き込む。
+def _paint_opaque_pixels(psd: PSDImage, layer_id: str, canvas: np.ndarray) -> None:
+    """`layer_id`（`LayerInfo.id`）の不透明画素を、ページ原寸の `canvas`（bool, 論理和で更新）へ
+    書き込む。
 
+    `LayerInfo.path` ではなく `id` で解決するのは、同名レイヤーがあると path が衝突し、
+    誤ったレイヤーの画素を焼き込んでしまうため（#20）。
     レイヤーが見つからない、ピクセルを持たない、または完全にページ外の場合は何もしない。
     """
-    layer = _find_layer(psd, "", layer_path)
+    layer = _find_layer(psd, layer_id)
     if layer is None:
         return
 

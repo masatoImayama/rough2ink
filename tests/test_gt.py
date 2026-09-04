@@ -56,13 +56,16 @@ def _make_gt_psd(path: Path) -> None:
     psd.save(str(path))
 
 
-_ROLE_MAPPING = {
-    "Group1/FillLayer": "fill",
-    "Group1/ToneLayer": "tone",
-    "Group1/LineLayer": "line",
-    "Group1/TextLayer": "text",
-    "Group1/IgnoreLayer": "ignore",
-    "Group1/HoleLayer": "tone",
+# マッピングのキーは `LayerInfo.id`（一意）であり、`LayerInfo.path`（同名だと衝突しうる、#20）
+# ではない。フィクスチャのレイヤー名は一意なので、名前→役割の対応を _layer_ids_by_name() の
+# id 解決と組み合わせて実際のマッピング dict を組み立てる。
+_ROLE_BY_NAME: dict[str, str] = {
+    "FillLayer": "fill",
+    "ToneLayer": "tone",
+    "LineLayer": "line",
+    "TextLayer": "text",
+    "IgnoreLayer": "ignore",
+    "HoleLayer": "tone",
 }
 
 
@@ -79,17 +82,30 @@ def _ingest_gt_psd(tmp_path: Path, monkeypatch) -> tuple[TestClient, str]:
     return client, page_id
 
 
+def _layer_ids_by_name(client: TestClient, page_id: str) -> dict[str, str]:
+    """レイヤー名 → `LayerInfo.id` の対応を取得する（GT マッピングのキー組み立て用）。"""
+    response = client.get(f"/api/pages/{page_id}/layers")
+    assert response.status_code == 200
+    return {layer["name"]: layer["id"] for layer in response.json()}
+
+
+def _role_mapping(client: TestClient, page_id: str) -> dict[str, str]:
+    """`_ROLE_BY_NAME`（名前ベース）を実際の id ベースのマッピングへ変換する。"""
+    ids = _layer_ids_by_name(client, page_id)
+    return {ids[name]: role for name, role in _ROLE_BY_NAME.items()}
+
+
 # --- core.gt: マッピングの保存・取得 -----------------------------------------
 
 
 def test_save_and_load_mapping_roundtrip(tmp_path: Path, monkeypatch) -> None:
     client, page_id = _ingest_gt_psd(tmp_path, monkeypatch)
-    assert client is not None  # ページを永続化するためだけに使う
+    mapping = _role_mapping(client, page_id)
 
-    gt.save_mapping(page_id, _ROLE_MAPPING)
+    gt.save_mapping(page_id, mapping)
 
     loaded = gt.load_mapping(page_id)
-    assert loaded == _ROLE_MAPPING
+    assert loaded == mapping
 
 
 def test_load_mapping_returns_empty_dict_when_unsaved(tmp_path: Path, monkeypatch) -> None:
@@ -116,8 +132,8 @@ def test_load_mapping_raises_for_unknown_page(tmp_path: Path, monkeypatch) -> No
 
 
 def test_build_gt_masks_resolves_priority_and_excludes_ignore(tmp_path: Path, monkeypatch) -> None:
-    _client, page_id = _ingest_gt_psd(tmp_path, monkeypatch)
-    gt.save_mapping(page_id, _ROLE_MAPPING)
+    client, page_id = _ingest_gt_psd(tmp_path, monkeypatch)
+    gt.save_mapping(page_id, _role_mapping(client, page_id))
 
     masks = gt.build_gt_masks(page_id)
 
@@ -195,17 +211,18 @@ def test_build_gt_masks_raises_for_unknown_page(tmp_path: Path, monkeypatch) -> 
 
 def test_put_and_get_gt_mapping_roundtrip(tmp_path: Path, monkeypatch) -> None:
     client, page_id = _ingest_gt_psd(tmp_path, monkeypatch)
+    mapping = _role_mapping(client, page_id)
 
-    put_response = client.put(f"/api/pages/{page_id}/gt", json={"mapping": _ROLE_MAPPING})
+    put_response = client.put(f"/api/pages/{page_id}/gt", json={"mapping": mapping})
     assert put_response.status_code == 200
-    assert put_response.json()["mapping"] == _ROLE_MAPPING
+    assert put_response.json()["mapping"] == mapping
 
     get_response = client.get(f"/api/pages/{page_id}/gt")
     assert get_response.status_code == 200
-    assert get_response.json()["mapping"] == _ROLE_MAPPING
+    assert get_response.json()["mapping"] == mapping
 
     # ディスクに永続化され、再読み込みでも復元できる。
-    assert gt.load_mapping(page_id) == _ROLE_MAPPING
+    assert gt.load_mapping(page_id) == mapping
 
 
 def test_get_gt_mapping_returns_empty_mapping_when_unsaved(tmp_path: Path, monkeypatch) -> None:
@@ -241,3 +258,68 @@ def test_put_gt_mapping_rejects_unknown_role(tmp_path: Path, monkeypatch) -> Non
     response = client.put(f"/api/pages/{page_id}/gt", json={"mapping": {"Group1/FillLayer": "not-a-role"}})
 
     assert response.status_code == 422
+
+
+# --- core.gt: 同名レイヤーの取り違え（#20） -----------------------------------
+
+
+def _make_gt_psd_with_duplicate_layer_names(path: Path) -> None:
+    """同一グループ内に同名レイヤーを2枚持つ PSD（役割の取り違え検証用、#20）。
+
+    実PSDでは「レイヤー 1」「レイヤー 1 のコピー」のような重複名が日常的に存在する
+    （Epic 仕様書 4-A 節: レイヤー命名規則は一貫していない前提）。2枚を離れた位置に
+    置くことで、GT マスク上のどちらの領域が塗られたかで取り違えを検出できる。
+    """
+    psd = PSDImage.new("RGBA", _PAGE_SIZE, color=(255, 255, 255, 255))
+    group = Group.new(psd, "Group1")
+    _opaque_layer(group, "DupLayer", left=1, top=1, width=4, height=4)  # rows[1,5) cols[1,5)
+    _opaque_layer(group, "DupLayer", left=15, top=15, width=4, height=4)  # rows[15,19) cols[15,19)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    psd.save(str(path))
+
+
+def test_build_gt_masks_resolves_duplicate_layer_names_by_id_not_by_first_match(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """同名レイヤーに別々の役割を割り当てても取り違えないこと（#20）。
+
+    `LayerInfo.path` は両レイヤーとも "Group1/DupLayer" で同一になるため、path で解決すると
+    常に最初の一致（1枚目）が両方の役割に使われ、2枚目に割り当てたはずの役割が
+    1枚目の画素に焼かれてしまう。id で解決すればそれぞれ独立に正しく塗り分けられる。
+    """
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    psd_path = tmp_path / "dup.psd"
+    _make_gt_psd_with_duplicate_layer_names(psd_path)
+    with psd_path.open("rb") as fh:
+        response = client.post(
+            "/api/ingest", files={"file": ("dup.psd", fh, "image/vnd.adobe.photoshop")}
+        )
+    assert response.status_code == 200
+    page_id = response.json()[0]["page_id"]
+
+    layers = client.get(f"/api/pages/{page_id}/layers").json()
+    dup_layers = [layer for layer in layers if layer["name"] == "DupLayer"]
+    assert len(dup_layers) == 2
+    # path（表示用）は同一だが id は一意に区別できる。
+    assert dup_layers[0]["path"] == dup_layers[1]["path"] == "Group1/DupLayer"
+    assert dup_layers[0]["id"] != dup_layers[1]["id"]
+
+    # bbox で「1枚目(left=1)」「2枚目(left=15)」を特定する（id の走査順序には依存しない）。
+    layer_at_1 = next(layer for layer in dup_layers if layer["bbox"][0] == 1)
+    layer_at_15 = next(layer for layer in dup_layers if layer["bbox"][0] == 15)
+
+    mapping = {layer_at_1["id"]: "fill", layer_at_15["id"]: "line"}
+    gt.save_mapping(page_id, mapping)
+    # 名前が同じでも id が異なるため、両方のエントリが失われずに保持される（#20 (a) の回帰）。
+    assert len(gt.load_mapping(page_id)) == 2
+
+    masks = gt.build_gt_masks(page_id)
+
+    # 1枚目(left=1)の領域は fill、2枚目(left=15)の領域は line として塗られる（取り違えていない）。
+    assert masks["fill"][2, 2] == 255
+    assert masks["line"][2, 2] == 0
+
+    assert masks["line"][16, 16] == 255
+    assert masks["fill"][16, 16] == 0

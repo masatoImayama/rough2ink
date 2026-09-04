@@ -124,14 +124,16 @@ def load_psd(path: Path, *, page_id: str | None = None) -> PageDocument:
     )
 
 
-def extract_layer_raster(path: Path, layer_path: str) -> np.ndarray | None:
-    """階層パス `layer_path` に一致するレイヤーのラスタをグレースケール ndarray で返す。
+def extract_layer_raster(path: Path, layer_id: str) -> np.ndarray | None:
+    """`LayerInfo.id`（`layer_id`）に一致するレイヤーのラスタをグレースケール ndarray で返す。
 
     GT マッピング（T7）でレイヤーの実ピクセルを参照するための補助関数。
-    レイヤーが見つからない、またはピクセルを持たない場合は `None` を返す。
+    `LayerInfo.path` は同名レイヤーがあると一意性を保証できない（#20）ため、
+    `LayerInfo.id` で解決する。レイヤーが見つからない、またはピクセルを持たない場合は
+    `None` を返す。
     """
     psd = PSDImage.open(str(path))
-    target = _find_layer(psd, "", layer_path)
+    target = _find_layer(psd, layer_id)
     if target is None:
         return None
 
@@ -141,13 +143,24 @@ def extract_layer_raster(path: Path, layer_path: str) -> np.ndarray | None:
     return np.array(pil_image.convert("L"))
 
 
-def _find_layer(group: object, parent_path: str, target_path: str) -> object | None:
+def _find_layer(
+    group: object, target_id: str, counter: itertools.count | None = None
+) -> object | None:
+    """`target_id`（`LayerInfo.id`）に一致するレイヤーをツリーから探す。
+
+    `_walk_layers` と全く同じ順序・同じ規則（`_layer_id`）で走査することで、
+    `layer_id` を持たないレイヤーに割り振られる `idx<n>` フォールバックも
+    `_walk_layers` の結果と一致させる。`counter` は再帰全体で共有する
+    （最初の呼び出しでは省略してよい）。
+    """
+    if counter is None:
+        counter = itertools.count()
     for layer in group:
-        path = f"{parent_path}/{layer.name}" if parent_path else layer.name
-        if path == target_path:
+        layer_id = _layer_id(layer, next(counter))
+        if layer_id == target_id:
             return layer
         if layer.kind in _GROUP_LIKE_KINDS:
-            found = _find_layer(layer, path, target_path)
+            found = _find_layer(layer, target_id, counter)
             if found is not None:
                 return found
     return None

@@ -288,7 +288,10 @@ def test_analyze_returns_metrics_when_gt_mapping_exists(tmp_path: Path, monkeypa
     assert before.status_code == 200
     assert before.json()["metrics"] is None
 
-    gt.save_mapping(page_id, {"Group1/FillLayer": "fill"})
+    # GT マッピングのキーは `LayerInfo.id`（同名レイヤーがあっても衝突しない、#20）。
+    layers = client.get(f"/api/pages/{page_id}/layers").json()
+    fill_layer_id = next(layer["id"] for layer in layers if layer["path"] == "Group1/FillLayer")
+    gt.save_mapping(page_id, {fill_layer_id: "fill"})
 
     after = _analyze(client, page_id, params)
     assert after.status_code == 200

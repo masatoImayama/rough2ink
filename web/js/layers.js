@@ -4,6 +4,9 @@
  * `GET /api/pages/{page_id}/layers`（routes_ingest.py）でレイヤー一覧を、
  * `GET /api/pages/{page_id}/gt`（routes_gt.py）で保存済みマッピングを取得し、
  * 役割を選択して `PUT /api/pages/{page_id}/gt` で保存する。
+ *
+ * マッピングのキーは `layer.id`（`LayerInfo.id`）を使う。`layer.path` は表示専用であり、
+ * 同名レイヤーがあると一意性を保証しないため（#20）、送信キーには使わない。
  */
 
 import * as api from "./api.js";
@@ -13,7 +16,7 @@ const ROLES = ["line", "fill", "tone", "text", "ignore"];
 /**
  * レイヤーマッピング UI を `container` に描画する。
  *
- * @returns 保存対象として編集中のマッピングオブジェクト（`{layer_path: role}`）。
+ * @returns 保存対象として編集中のマッピングオブジェクト（`{layer_id: role}`）。
  */
 export async function renderLayerMapping(container, pageId, layers, statusEl) {
   container.innerHTML = "";
@@ -55,10 +58,10 @@ export async function renderLayerMapping(container, pageId, layers, statusEl) {
       option.textContent = role;
       select.appendChild(option);
     }
-    select.value = mapping[layer.path] ?? "";
+    select.value = mapping[layer.id] ?? "";
     select.addEventListener("change", () => {
-      if (select.value === "") delete mapping[layer.path];
-      else mapping[layer.path] = select.value;
+      if (select.value === "") delete mapping[layer.id];
+      else mapping[layer.id] = select.value;
     });
     roleTd.appendChild(select);
 

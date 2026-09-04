@@ -22,6 +22,7 @@ from psd_tools.api.layers import Group, PixelLayer
 from rough2ink.app import app
 from rough2ink.core import gt
 from rough2ink.core.batch import BatchProgress, discover_input_files, run_batch
+from rough2ink.core.loaders import load_psd
 from rough2ink.core.params import AnalysisParams, QualityParams
 from rough2ink.core.presets import save_preset
 
@@ -242,7 +243,11 @@ def test_run_batch_computes_metrics_when_gt_mapping_exists(tmp_path: Path, monke
     assert first_report["pages_with_metrics"] == 0
     assert not (out_dir / "art" / "metrics.json").is_file()
 
-    gt.save_mapping("art", {"Group1/FillLayer": "fill"})
+    # GT マッピングのキーは `LayerInfo.id`（同名レイヤーがあっても衝突しない、#20）。
+    fill_layer_id = next(
+        layer.id for layer in load_psd(psd_path).layers if layer.path == "Group1/FillLayer"
+    )
+    gt.save_mapping("art", {fill_layer_id: "fill"})
 
     # 2回目: 同じ page_id ("art") に GT マッピングが設定済みなので metrics.json が書かれる。
     second_report = run_batch(input_dir, out_dir, params)
