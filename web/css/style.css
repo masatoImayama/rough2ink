@@ -1,0 +1,209 @@
+/* rough2ink 前処理検証ツール UI（T10）。
+   ビルド不要の素の CSS。フレームワーク・CDN は使わない。 */
+
+:root {
+  --color-line: rgb(30, 100, 255);
+  --color-fill: rgb(230, 40, 40);
+  --color-tone: rgb(30, 170, 60);
+  --color-panel: rgb(230, 195, 0);
+  --color-balloon: rgb(160, 40, 200);
+  --border-color: #ccc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  margin: 1.5rem;
+  color: #222;
+}
+
+h1 {
+  font-size: 1.4rem;
+}
+
+h2 {
+  font-size: 1.05rem;
+  margin-top: 0;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 0.25rem;
+}
+
+section {
+  margin-bottom: 1.25rem;
+}
+
+.status {
+  color: #555;
+  font-size: 0.9rem;
+  min-height: 1.2em;
+}
+
+#main-layout {
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+#sidebar {
+  flex: 0 0 320px;
+  min-width: 260px;
+}
+
+#viewer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#page-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+}
+
+#page-list li {
+  border-bottom: 1px solid var(--border-color);
+}
+
+#page-list button {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+#page-list button:hover {
+  background: #eef;
+}
+
+.param-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  margin: 0.25rem 0;
+}
+
+.param-row .param-name {
+  flex: 0 0 9.5rem;
+}
+
+.param-row input[type="range"] {
+  flex: 1 1 auto;
+}
+
+.param-row .param-value {
+  flex: 0 0 3.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+fieldset {
+  border: 1px solid var(--border-color);
+  margin-bottom: 0.6rem;
+}
+
+legend {
+  font-weight: bold;
+  font-size: 0.85rem;
+}
+
+#layer-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.layer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  padding: 0.15rem 0.4rem;
+  border-left: 4px solid transparent;
+}
+
+.layer-toggle--line {
+  border-color: var(--color-line);
+}
+
+.layer-toggle--fill {
+  border-color: var(--color-fill);
+}
+
+.layer-toggle--tone {
+  border-color: var(--color-tone);
+}
+
+.layer-toggle--panel {
+  border-color: var(--color-panel);
+}
+
+.layer-toggle--balloon {
+  border-color: var(--color-balloon);
+}
+
+.layer-toggle input[type="range"] {
+  width: 5rem;
+}
+
+#canvas-wrap {
+  border: 1px solid var(--border-color);
+  overflow: auto;
+  max-height: 75vh;
+}
+
+#overlay-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.layer-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+.layer-table th,
+.layer-table td {
+  border: 1px solid var(--border-color);
+  padding: 0.2rem 0.4rem;
+  text-align: left;
+}
+
+#quality-report dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+#quality-report dt {
+  font-weight: bold;
+}
+
+#panel-metrics,
+#gt-metrics {
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+}
+
+#gt-metrics table {
+  border-collapse: collapse;
+}
+
+#gt-metrics th,
+#gt-metrics td {
+  border: 1px solid var(--border-color);
+  padding: 0.2rem 0.5rem;
+}
