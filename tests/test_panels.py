@@ -173,6 +173,64 @@ def test_spread_page_flags_all_panels() -> None:
         assert "spread" in panel.flags
 
 
+def test_spread_flag_uses_orientation_not_max_min_ratio() -> None:
+    """真の見開き（横長）ページでは実寸相当でも `spread` が立つこと（Review #14）。
+
+    `is_spread` を max(w,h)/min(w,h) で読むと縦長・横長を区別できず、
+    このテストの横長ページと直後の縦長ページ（同じ aspect 1.414）が
+    どちらも spread 扱いになってしまう。向き（w/h）で判定することを確認する。
+    """
+    page = _blank_page(1000, 1414)  # h=1000, w=1414 -> w/h = 1.414 (真の見開き相当)
+    _draw_border(page, 40, 40, 660, 960)
+    _draw_border(page, 754, 40, 1374, 960)
+
+    panels = detect_panels(page, PanelParams())
+
+    assert len(panels) == 2
+    for panel in panels:
+        assert "spread" in panel.flags
+
+
+def test_portrait_page_at_realistic_scale_does_not_flag_spread() -> None:
+    """A4/B4 相当（aspect 1.414）の縦長ページで `spread` が立たないこと（Review #14）。
+
+    旧実装の `max(w,h)/min(w,h) > 1.2` は向きを捨てるため、この縦長ページも
+    誤って見開き判定になっていた（実原稿に対して成功率が常に0になる原因）。
+    """
+    page = _blank_page(1414, 1000)  # h=1414, w=1000 -> w/h ≈ 0.707 (縦長・単ページ相当)
+    cells = [(40, 40, 480, 680), (520, 40, 960, 680), (40, 720, 480, 1360), (520, 720, 960, 1360)]
+    for x1, y1, x2, y2 in cells:
+        _draw_border(page, x1, y1, x2, y2)
+
+    panels = detect_panels(page, PanelParams())
+
+    assert len(panels) == 4
+    for panel in panels:
+        assert "spread" not in panel.flags
+
+
+def test_detect_panels_counts_synthetic_grid_at_realistic_page_scale() -> None:
+    """1414x1000（A4/B4相当）の縦長ページに描いた 2x2 グリッドで、4コマ全てが検出されること
+    （Review #17）。
+
+    旧実装はモルフォロジー勾配が太い枠線を2本の細いレールに分解してしまい、ハフ変換の
+    投票が不足して辺を取りこぼす（4コマ中3コマしか検出できない）ことがあった。しかも
+    `unclosed` フラグも立たず無言で欠落するため、この規模のテストを追加しないと
+    検出不能な状態のまま気づけない。
+    """
+    page = _blank_page(1414, 1000)  # h=1414, w=1000 (A4/B4 相当の縦長ページ)
+    cells = [(40, 40, 480, 680), (520, 40, 960, 680), (40, 720, 480, 1360), (520, 720, 960, 1360)]
+    for x1, y1, x2, y2 in cells:
+        _draw_border(page, x1, y1, x2, y2)
+
+    panels = detect_panels(page, PanelParams())
+
+    assert len(panels) == 4
+    for panel in panels:
+        assert panel.flags == []
+        assert panel.is_clean
+
+
 def test_effect_lines_panel_is_flagged() -> None:
     """コマ内部の直線密度が高い（集中線・効果線を想定）場合に `effect_lines` が立つこと。"""
     page = _blank_page(320, 320)

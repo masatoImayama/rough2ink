@@ -39,7 +39,11 @@ from rough2ink.core.types import PanelFlag, PanelInfo
 # ハフ変換で枠線候補とみなす最小長は、ページ短辺に対する比率で決める。
 _LINE_MIN_LENGTH_RATIO = 0.2
 _LINE_MIN_LENGTH_FLOOR = 30
-_HOUGH_VOTE_THRESHOLD = 30
+# ハフ変換の投票閾値は固定値ではなく minLineLength に比例させる（Review #17）。
+# 固定値のままだとページが大きくなり minLineLength が伸びるほど閾値が相対的に緩くなり、
+# 逆にページが小さいと厳しくなりすぎる、という規模依存の不安定さを生む。
+_HOUGH_VOTE_THRESHOLD_RATIO = 0.5
+_HOUGH_VOTE_THRESHOLD_FLOOR = 15
 _HOUGH_MAX_LINE_GAP = 15
 _HOUGH_LINE_THICKNESS = 3
 
@@ -103,7 +107,9 @@ def detect_panels(gray: np.ndarray, params: PanelParams | None = None) -> list[P
             continue
         candidates.append((contour, True))
 
-    is_spread = (max(w, h) / max(1.0, float(min(w, h)))) > params.spread_aspect_ratio
+    # 向き（横長であること）で判定する。max/min で読むと縦長・横長を区別できず、
+    # A4/B4 等の縦長原稿ページ（aspect ≈ 1.414）まで誤って見開き判定になる（Review #14）。
+    is_spread = (float(w) / max(1.0, float(h))) > params.spread_aspect_ratio
 
     num_labels, labels = cv2.connectedComponentsWithStats(ink, connectivity=8)[:2]
     depth_kernel = cv2.getStructuringElement(
@@ -186,29 +192,41 @@ def _binarize_ink(gray: np.ndarray) -> np.ndarray:
 
 
 def _extract_frame_lines(ink: np.ndarray, h: int, w: int) -> np.ndarray:
-    """長い直線成分をハフ変換で抽出し、枠線候補マスクを作る。
+    """長い直線成分を抽出し、枠線候補マスクを作る（Epic 仕様書 4-C 節）。
 
-    塗りつぶされた塊（フキダシはみ出しの塊など）の輪郭は曲線であり長い直線を
-    生じないため、モルフォロジー勾配で輪郭線化してからハフ変換に掛けることで
-    誤検出を抑える。傾いたコマ枠（`oblique`）も検出できるよう、水平・垂直に
-    限定しない汎用のハフ変換を用いる（Epic 仕様書 4-C 節の「ハフ変換」経路）。
+    水平・垂直の枠線は、長い長方形カーネルによるモルフォロジー開放（opening）で
+    直接抽出する。この経路は太さをそのまま保つため、モルフォロジー勾配で先に
+    輪郭線化してからハフ変換に掛ける旧経路（`_HOUGH_VOTE_THRESHOLD` の投票不足で
+    太い枠線を2本の細いレールに分解し、辺を取りこぼす原因になっていた。Review #17）
+    より安定する。
+
+    傾いたコマ枠（`oblique`）は開放処理では拾えないため、こちらは引き続き
+    モルフォロジー勾配 + ハフ変換で検出し、開放処理の結果と論理和で合成する。
     """
-    edges = cv2.morphologyEx(ink, cv2.MORPH_GRADIENT, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
     min_length = max(_LINE_MIN_LENGTH_FLOOR, int(min(h, w) * _LINE_MIN_LENGTH_RATIO))
+
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (min_length, 1))
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, min_length))
+    horizontal_lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, horizontal_kernel)
+    vertical_lines = cv2.morphologyEx(ink, cv2.MORPH_OPEN, vertical_kernel)
+    straight_lines = cv2.bitwise_or(horizontal_lines, vertical_lines)
+
+    edges = cv2.morphologyEx(ink, cv2.MORPH_GRADIENT, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+    vote_threshold = max(_HOUGH_VOTE_THRESHOLD_FLOOR, int(min_length * _HOUGH_VOTE_THRESHOLD_RATIO))
     lines = cv2.HoughLinesP(
         edges,
         1,
         np.pi / 180,
-        threshold=_HOUGH_VOTE_THRESHOLD,
+        threshold=vote_threshold,
         minLineLength=min_length,
         maxLineGap=_HOUGH_MAX_LINE_GAP,
     )
     canvas = np.zeros_like(ink)
-    if lines is None:
-        return canvas
-    for x1, y1, x2, y2 in lines.reshape(-1, 4):
-        cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), 255, _HOUGH_LINE_THICKNESS)
-    return canvas
+    if lines is not None:
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), 255, _HOUGH_LINE_THICKNESS)
+
+    return cv2.bitwise_or(straight_lines, canvas)
 
 
 def _close(mask: np.ndarray, kernel_size: int) -> np.ndarray:
