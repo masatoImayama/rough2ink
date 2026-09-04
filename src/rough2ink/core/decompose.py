@@ -7,10 +7,16 @@
 処理の指針（Epic 仕様書 4-B 節 / 設計書 3章「分解器」）:
 
 1. トーン: 網点は周期構造なので `tone.window` x `tone.window` の重なり合うブロックに
-   窓関数を掛けて 2D FFT し、`tone.bandpass_low`〜`tone.bandpass_high` の帯域エネルギー比
-   （DC 成分を除いた全エネルギーに対する比）が `tone.energy_threshold` 以上のブロックを
-   トーン候補とする。ブロック単位の判定であること自体が、周波数が空間的に変化する
-   グラデーショントーンへの対処になる。
+   窓関数を掛けて 2D FFT する。帯域エネルギー比（DC 成分を除いた全エネルギーに対する、
+   `tone.bandpass_low`〜`tone.bandpass_high` 帯域のエネルギーの比）だけでは「帯域に構造が
+   あるか」しか測れず、通常の線画やカケアミもエネルギーが帯域内に広く分散するため高い
+   比を示してしまう（#16）。網点は周期構造なのでスペクトルに孤立した鋭いピークを持つのに
+   対し、線画・カケアミはエネルギーが帯域内に広く分散する。そこで帯域内の最大ビン
+   エネルギーと中央値の比（尖鋭度）を主判定に使い、`tone.sharpness_threshold` 以上の
+   ブロックだけをトーン候補とする。帯域エネルギー比 (`tone.energy_threshold`) は
+   「そもそも帯域に有意なエネルギーがあるか」を落とす前段フィルタとして併用する
+   （両方の閾値を満たしたブロックのみがトーン候補になる）。ブロック単位の判定であること
+   自体が、周波数が空間的に変化するグラデーショントーンへの対処になる。
 2. ベタ: `fill.black_threshold` 以下で二値化した連結成分のうち、面積が
    ページ面積の `fill.min_area_ratio` 以上、かつ `fill.erosion_radius` の収縮後も
    画素が残る成分を採用する（細線は収縮で消えるため線と自然に分離できる）。
@@ -105,7 +111,14 @@ def _detect_fill(gray: np.ndarray, params: FillParams) -> np.ndarray:
 
 
 def _detect_tone(gray: np.ndarray, params: ToneParams) -> np.ndarray:
-    """ブロック単位の FFT 帯域エネルギー比でトーン（網点）領域を検出する。"""
+    """ブロック単位の FFT で、帯域内スペクトルの尖鋭度（周期性）からトーン（網点）領域を検出する。
+
+    網点のような周期構造は帯域内の1〜数箇所に孤立したピークを持つため、
+    「帯域内最大ビンエネルギー / 帯域内中央値」（尖鋭度）が高くなる。一方、通常の
+    線画・カケアミは帯域エネルギー比自体は高くてもエネルギーが帯域内に広く分散し、
+    尖鋭度は低い（#16）。判定は帯域エネルギー比（前段フィルタ）と尖鋭度（主判定）の
+    両方が閾値以上であることを要求する。
+    """
     height, width = gray.shape
     window = max(8, min(params.window, height, width))
     stride = max(1, min(params.stride, window))
@@ -134,7 +147,8 @@ def _detect_tone(gray: np.ndarray, params: ToneParams) -> np.ndarray:
         spectrum = np.fft.fft2(windowed, axes=(-2, -1))
         power = np.abs(spectrum) ** 2
 
-        band_energy = (power * band_mask).sum(axis=(-2, -1))
+        band_values = power[:, :, band_mask]  # (nrows, ncols, n_band_bins)
+        band_energy = band_values.sum(axis=-1)
         total_energy = (power * total_mask).sum(axis=(-2, -1))
         ratio = np.divide(
             band_energy,
@@ -142,7 +156,22 @@ def _detect_tone(gray: np.ndarray, params: ToneParams) -> np.ndarray:
             out=np.zeros_like(band_energy),
             where=total_energy > 0,
         )
-        is_tone = (ratio >= params.energy_threshold).astype(np.float32)
+
+        # 尖鋭度（周期性）: 帯域内で1〜数箇所に孤立したピークがあるほど、
+        # 最大ビンエネルギーが中央値を大きく上回る。網点はこの値が高く、
+        # エネルギーが帯域内に広く分散する線画・カケアミは低い（#16）。
+        median_band = np.median(band_values, axis=-1)
+        max_band = band_values.max(axis=-1)
+        sharpness = np.divide(
+            max_band,
+            median_band,
+            out=np.zeros_like(max_band),
+            where=median_band > 0,
+        )
+
+        is_tone = (
+            (ratio >= params.energy_threshold) & (sharpness >= params.sharpness_threshold)
+        ).astype(np.float32)
 
         for row_index, top in enumerate(chunk_rows):
             row_slice = slice(top, top + window)

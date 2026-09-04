@@ -4,10 +4,16 @@
 細線が `line` に分類されることを確認する。グラデーション網点（周波数が空間的に
 変化する網点）でも `tone` として検出できることと、3マスクが相互排他であること、
 5000x7000px でメモリエラーにならないことも検証する。
+
+トーン判定は帯域エネルギー比だけでなく帯域内スペクトルの尖鋭度（周期性）も見る（#16）。
+曲線ストローク（同心楕円）・カケアミ（クロスハッチング）はエネルギーが帯域内に広く
+分散するため tone に分類されず、真の網点（周期的ドット）だけが尖鋭なピークを持つため
+tone に分類されることを検証する。
 """
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 from rough2ink.core.decompose import decompose
@@ -71,6 +77,55 @@ def _make_thin_line(shape: tuple[int, int], row: int, thickness: int = 2) -> np.
     return canvas
 
 
+def _make_concentric_curves(shape: tuple[int, int], spacing: int = 16, thickness: int = 1) -> np.ndarray:
+    """同心楕円を並べた曲線ストローク画像を作る（周波数がブロック内で連続的に変化する）。
+
+    手描きの服の皺・キャラクターの輪郭に近い、細い（1px）曲線ストロークを想定する。
+    間隔を狭く（例: 6px）・太く（例: 2px）すると局所的にほぼ等間隔な平行線と化し、
+    網点と区別できない正当な周期構造になってしまうため、標準的な線幅・間隔を選ぶ。
+    """
+    height, width = shape
+    canvas = np.full(shape, 255, dtype=np.uint8)
+    center = (width // 2 + 15, height // 2 - 10)
+    max_radius = max(height, width)
+    for radius in range(4, max_radius, spacing):
+        cv2.ellipse(canvas, center, (radius, int(radius * 0.7)), 15, 0, 360, 0, thickness)
+    return canvas
+
+
+def _make_cross_hatch(
+    shape: tuple[int, int],
+    spacing: int = 6,
+    thickness: int = 1,
+    jitter: float = 1.2,
+    angle_jitter_deg: float = 6.0,
+    seed: int = 0,
+) -> np.ndarray:
+    """手描き風のばらつき（間隔・角度のジッター）を持つカケアミ画像を作る。
+
+    完全に規則正しいグリッドは網点と同じく周波数的に孤立ピークを持ってしまうため、
+    実際の手描きカケアミに近いばらつきを与える。
+    """
+    height, width = shape
+    canvas = np.full(shape, 255, dtype=np.uint8)
+    rng = np.random.default_rng(seed)
+    max_dim = max(height, width)
+
+    for base_angle in (45.0, -45.0):
+        for offset in range(-2 * max_dim, 2 * max_dim, spacing):
+            jittered_offset = offset + rng.uniform(-jitter, jitter)
+            angle = base_angle + rng.uniform(-angle_jitter_deg, angle_jitter_deg)
+            rad = np.deg2rad(angle)
+            dx, dy = np.cos(rad), np.sin(rad)
+            cx = width / 2 + jittered_offset * (-dy)
+            cy = height / 2 + jittered_offset * dx
+            length = max_dim * 1.5
+            x1, y1 = cx - dx * length, cy - dy * length
+            x2, y2 = cx + dx * length, cy + dy * length
+            cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), 0, thickness)
+    return canvas
+
+
 def _inner(region_slice: slice, margin: int) -> slice:
     """境界付近（ブロック重なりの影響を受けやすい領域）を除いた内側スライスを返す。"""
     start = region_slice.start + margin
@@ -121,6 +176,53 @@ def test_thin_line_is_classified_as_line() -> None:
     assert line_pixels.mean() / 255.0 > 0.9, "thin line should be classified as line"
     assert result["fill"][100:102, 20:180].max() == 0, "thin line must not survive erosion into fill"
     assert result["tone"][100:102, 20:180].max() == 0
+
+
+def test_concentric_curve_strokes_are_not_classified_as_tone() -> None:
+    """曲線ストローク（同心楕円）は帯域エネルギー比だけを見ると tone と誤判定されうるが、
+    エネルギーが帯域内に広く分散し孤立ピークを持たないため tone に分類されないこと（#16）。
+    """
+    shape = (220, 220)
+    gray = _make_concentric_curves(shape, spacing=16, thickness=1)
+    params = AnalysisParams()
+
+    result = decompose(gray, params)
+
+    inner = (slice(40, shape[0] - 40), slice(40, shape[1] - 40))
+    tone_ratio = result["tone"][inner].mean() / 255.0
+    assert tone_ratio < 0.05, (
+        f"curved strokes must not be misclassified as tone, got tone_ratio={tone_ratio}"
+    )
+
+
+def test_cross_hatching_is_not_classified_as_tone() -> None:
+    """カケアミ（クロスハッチング）は帯域エネルギー比だけを見ると tone と誤判定されうるが、
+    網点のような孤立した周波数ピークを持たないため tone に分類されないこと（#16）。
+    """
+    shape = (220, 220)
+    gray = _make_cross_hatch(shape, spacing=6, thickness=1)
+    params = AnalysisParams()
+
+    result = decompose(gray, params)
+
+    inner = (slice(40, shape[0] - 40), slice(40, shape[1] - 40))
+    tone_ratio = result["tone"][inner].mean() / 255.0
+    assert tone_ratio < 0.05, (
+        f"cross-hatching must not be misclassified as tone, got tone_ratio={tone_ratio}"
+    )
+
+
+def test_true_halftone_dots_are_still_classified_as_tone() -> None:
+    """真の網点（周期的なドット）は尖鋭度判定を追加した後も引き続き tone に分類されること（#16）。"""
+    shape = (220, 220)
+    gray = _make_halftone(shape, period=8, radius=2.5)
+    params = AnalysisParams()
+
+    result = decompose(gray, params)
+
+    inner = (slice(40, shape[0] - 40), slice(40, shape[1] - 40))
+    tone_ratio = result["tone"][inner].mean() / 255.0
+    assert tone_ratio > 0.9, f"true halftone dots should still be tone, got tone_ratio={tone_ratio}"
 
 
 def test_gradient_halftone_is_classified_as_tone() -> None:

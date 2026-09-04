@@ -16,6 +16,7 @@ EXPECTED_DEFAULTS: dict[str, dict[str, float | int]] = {
         "bandpass_low": 0.08,
         "bandpass_high": 0.45,
         "energy_threshold": 0.20,
+        "sharpness_threshold": 1500.0,
     },
     "fill": {
         "black_threshold": 64,
