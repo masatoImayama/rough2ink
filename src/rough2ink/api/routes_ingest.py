@@ -138,9 +138,18 @@ async def ingest(file: UploadFile = File(...)) -> list[PageSummary]:
 
 @router.get("/pages", response_model=list[PageSummary])
 def list_pages() -> list[PageSummary]:
-    """永続化済みの全ページを一覧で返す。"""
+    """永続化済みの全ページを一覧で返す。
+
+    `page.png`（原寸画像）を持つページのみを対象にする。バッチ処理（`core.batch`,
+    #12）は GT マッピング参照のため `meta.json` だけを `workspace/pages/<page_id>/` に
+    書き出すことがあり、`page.png` / `preview.png` を持たないそのようなページを一覧に
+    出すと、選択しても `GET /preview` `POST /analyze` が 404 になる
+    （Review #23: 一覧に出るが選択すると404で無反応になる）。
+    """
     summaries: list[PageSummary] = []
     for meta_path in sorted(_pages_dir().glob("*/meta.json")):
+        if not (meta_path.parent / "page.png").is_file():
+            continue
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         summaries.append(
             PageSummary(

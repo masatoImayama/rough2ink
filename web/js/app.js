@@ -90,13 +90,20 @@ async function selectPage(pageId) {
   state.pageId = pageId;
   byId("page-status").textContent = `選択中: ${pageId}`;
 
-  const layers = await api.getLayers(pageId);
-  await renderLayerMapping(byId("layer-mapping"), pageId, layers, byId("gt-status"));
+  // Review #23: バッチ処理した meta.json のみのページ（page.png/preview.png を持たない）
+  // が一覧に出ることがあり、選ぶと各 API が 404 を返す。ここで捕捉せず投げっぱなしにすると
+  // 未処理の Promise 拒否になり画面に何も出ない（呼び出し元のクリックハンドラは await しない）。
+  try {
+    const layers = await api.getLayers(pageId);
+    await renderLayerMapping(byId("layer-mapping"), pageId, layers, byId("gt-status"));
 
-  await overlay.loadBase(api.previewUrl(pageId));
-  overlay.redraw();
+    await overlay.loadBase(api.previewUrl(pageId));
+    overlay.redraw();
 
-  await reanalyze();
+    await reanalyze();
+  } catch (err) {
+    byId("page-status").textContent = `ページの読み込みに失敗しました: ${err.message}`;
+  }
 }
 
 async function applyPresetParams(params) {
