@@ -24,6 +24,23 @@ from rough2ink.core.types import BBox
 # cv2.connectedComponentsWithStats の戻り値そのままの形。ラベル 0 は背景。
 _Components = tuple[int, np.ndarray, np.ndarray]
 
+# --- コマ枠バリア（#28）検出用の内部定数 ---
+#
+# `panels.py` の `_extract_frame_lines` 相当（長い直線をハフ変換で検出する処理）だが、
+# フキダシがコマ枠線を塗り潰して生じる断裂（フキダシの幅ぶん）を橋渡しできるよう
+# `maxLineGap` を大きく取る点が異なる。`panels.py` 側の値をそのまま流用すると、
+# 断ち切りコマ検出用に調整された小さい `maxLineGap`（15px）では典型的なフキダシの
+# 幅を橋渡しできないため、この用途専用の値を持つ（`panels.py` は変更しない）。
+# 投票閾値・最小長は `panels.py` の値をそのまま踏襲する。閾値を緩めると、フキダシの
+# 縁取り（楕円の弧）の一部が局所的に直線とみなされ、コマ枠を跨いでいない通常の
+# フキダシにまで誤ったバリアを引いてしまう（実装時に既存テストの回帰で確認済み）。
+_BARRIER_LINE_MIN_LENGTH_RATIO = 0.2
+_BARRIER_LINE_MIN_LENGTH_FLOOR = 30
+_BARRIER_HOUGH_VOTE_THRESHOLD_RATIO = 0.5
+_BARRIER_HOUGH_VOTE_THRESHOLD_FLOOR = 15
+_BARRIER_HOUGH_MAX_LINE_GAP = 80
+_BARRIER_LINE_THICKNESS_PX = 6
+
 
 def detect_balloons(
     gray: np.ndarray,
@@ -60,7 +77,8 @@ def detect_balloons(
         union |= _text_rect_mask(gray.shape, text_rects, params.text_rect_dilate)
 
     if use_white_fill or use_solidity:
-        components = _white_connected_components(gray, params.white_threshold)
+        barrier = _panel_border_barrier(gray)
+        components = _white_connected_components(gray, params.white_threshold, barrier)
         if use_white_fill:
             union |= _white_fill_mask(
                 gray,
@@ -109,13 +127,66 @@ def _text_rect_mask(
     return _dilate(mask, dilate_px)
 
 
-def _white_connected_components(gray: np.ndarray, white_threshold: int) -> _Components:
-    """`gray > white_threshold` の連結成分を返す（手がかり 2・3 で共有する下準備）。"""
+def _white_connected_components(
+    gray: np.ndarray, white_threshold: int, panel_barrier: np.ndarray | None = None
+) -> _Components:
+    """`gray > white_threshold` の連結成分を返す（手がかり 2・3 で共有する下準備）。
+
+    `panel_barrier` を渡すと、その画素位置は白から除外してから連結成分を求める。
+    コマ枠を跨いではみ出したフキダシは、跨いだ箇所の枠線インクごとフキダシに塗り
+    潰されるため、素の白領域だけではコマ内側とコマ外（余白）が地続きの 1 成分に
+    なってしまう（#28）。`_panel_border_barrier` が再構成したコマ枠線を分離線として
+    渡すことで、内側と外側を別成分に切り離す。
+    """
     white = (gray > white_threshold).astype(np.uint8) * 255
+    if panel_barrier is not None:
+        white = cv2.bitwise_and(white, cv2.bitwise_not(panel_barrier))
     num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(
         white, connectivity=8
     )
     return num_labels, labels, stats
+
+
+def _panel_border_barrier(gray: np.ndarray) -> np.ndarray:
+    """コマ枠線を分離線として再構成したバリアマスクを返す（#28）。
+
+    フキダシがコマ枠を跨いで余白（gutter）へはみ出すと、跨いだ箇所の枠線インクごと
+    フキダシに塗り潰されてしまう。素の白領域（`gray > white_threshold`）だけを見ると
+    その箇所で文字どおり枠線が途切れているため、コマ内側と余白が地続きの 1 連結成分に
+    なり、`_touches_border` による背景除外に丸ごと巻き込まれて脱落する。
+
+    ここではモルフォロジー勾配で得たインクの輪郭にハフ変換を掛けて長い直線（コマ枠線）
+    を検出するが、`maxLineGap` を大きく取ることで、フキダシに塗り潰された断裂（フキダシ
+    の幅ぶん）があっても直線として橋渡しして復元する。復元した直線を分離線として描く
+    ことで、コマ内側のフキダシ部分と余白側を別の連結成分に切り離し、コマ内側の部分だけ
+    でも損失マスクの候補として残せるようにする。
+
+    コマ枠線に相当する長い直線が画像中に無い場合（コマ枠を持たない画像等）は空マスクを
+    返し、既存挙動をそのまま保つ。
+    """
+    height, width = gray.shape
+    gray_u8 = gray if gray.dtype == np.uint8 else gray.astype(np.uint8)
+    _, ink = cv2.threshold(gray_u8, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    edges = cv2.morphologyEx(ink, cv2.MORPH_GRADIENT, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+
+    min_length = max(_BARRIER_LINE_MIN_LENGTH_FLOOR, int(min(height, width) * _BARRIER_LINE_MIN_LENGTH_RATIO))
+    vote_threshold = max(
+        _BARRIER_HOUGH_VOTE_THRESHOLD_FLOOR, int(min_length * _BARRIER_HOUGH_VOTE_THRESHOLD_RATIO)
+    )
+    lines = cv2.HoughLinesP(
+        edges,
+        1,
+        np.pi / 180,
+        threshold=vote_threshold,
+        minLineLength=min_length,
+        maxLineGap=_BARRIER_HOUGH_MAX_LINE_GAP,
+    )
+
+    barrier = np.zeros(gray.shape, dtype=np.uint8)
+    if lines is not None:
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            cv2.line(barrier, (int(x1), int(y1)), (int(x2), int(y2)), 255, _BARRIER_LINE_THICKNESS_PX)
+    return barrier
 
 
 def _touches_border(x: int, y: int, w: int, h: int, shape: tuple[int, int]) -> bool:
