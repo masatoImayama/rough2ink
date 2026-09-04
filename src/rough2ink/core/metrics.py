@@ -18,13 +18,17 @@ from typing import get_args
 
 import numpy as np
 
+from rough2ink.core import gt as gt_module
+from rough2ink.core.config import get_gt_dir
 from rough2ink.core.types import PanelFlag, PanelInfo
 
 # 分解器の評価対象ロール（GT/予測ともに相互排他の3マスク）。
 # `text` は評価対象外（ノイズ源として除外する側の領域）。
 _DECOMPOSE_ROLES: tuple[str, ...] = ("line", "fill", "tone")
 
-RoleMetrics = dict[str, float]
+# iou/precision/recall/f1 は「値なし」を None で表す（Review #18）ため float | None。
+# support/valid_pixels は常に int。
+RoleMetrics = dict[str, float | int | None]
 DecomposeMetrics = dict[str, RoleMetrics]
 
 # `core.panels.PanelInfo.flags` に立ちうる全フラグ。発生 0 件のフラグも
@@ -50,8 +54,14 @@ def decompose_metrics(
 
     Returns:
         `pred`/`gt` 双方に存在するロールについて
-        `{role: {"iou": ..., "precision": ..., "recall": ..., "f1": ...}}` を返す。
-        どちらのロールも無ければ空 dict。
+        `{role: {"iou": ..., "precision": ..., "recall": ..., "f1": ..., "support": ..., "valid_pixels": ...}}`
+        を返す。どちらのロールも無ければ空 dict。
+
+        該当ロールが評価対象画素内で予測・GT のどちらにも一切出現しない場合
+        （tp=fp=fn=0。GT にも予測にも存在しないロール等）、`iou`/`precision`/`recall`/`f1`
+        は「比較対象が無いので満点」とはせず `None` を返す（Review #18）。空虚な 1.0 と
+        真の 1.0 を区別するため、`support`（tp+fn。評価対象内の GT 陽性画素数）と
+        `valid_pixels`（評価対象画素数。`exclude_mask` 適用後）を必ず併記する。
     """
     roles = [role for role in _DECOMPOSE_ROLES if role in pred and role in gt]
     if not roles:
@@ -61,28 +71,49 @@ def decompose_metrics(
     valid = np.ones(sample_shape, dtype=bool)
     if exclude_mask is not None:
         valid &= exclude_mask == 0
+    valid_pixels = int(np.count_nonzero(valid))
 
     result: DecomposeMetrics = {}
     for role in roles:
         pred_bool = (pred[role] > 0) & valid
         gt_bool = (gt[role] > 0) & valid
-        result[role] = _confusion_metrics(pred_bool, gt_bool)
+        result[role] = _confusion_metrics(pred_bool, gt_bool, valid_pixels)
     return result
 
 
-def _confusion_metrics(pred_bool: np.ndarray, gt_bool: np.ndarray) -> RoleMetrics:
+def _confusion_metrics(pred_bool: np.ndarray, gt_bool: np.ndarray, valid_pixels: int) -> RoleMetrics:
     """真陽性/偽陽性/偽陰性から IoU/Precision/Recall/F1 を算出する（ゼロ除算安全）。
 
-    分母が 0 になる境界ケース（該当画素が予測にも GT にも存在しない等）は、
-    「比較対象が無いので一致とみなす（1.0）」という慣例に沿って安全な値を返す。
+    `iou_denom`（tp+fp+fn）が 0 になる境界ケースは、そのロールが評価対象画素内で
+    予測にも GT にも一切出現しなかったことを意味する（GT にも予測にも存在しないロール等）。
+    「比較対象が無いので一致とみなす（1.0）」という慣例は、このケースをマクロ平均に
+    満点として混入させてしまう（Review #18）ため採らない。`iou`/`precision`/`recall`/`f1`
+    は全て `None`（値なし）を返し、`macro_average_decompose_metrics` の平均対象から外す。
+
+    `iou_denom == 0` は `tp == fp == fn == 0` と等価であり、これは
+    `precision_denom`（tp+fp）と `recall_denom`（tp+fn）も同時に 0 であることを意味する
+    （precision/recall だけが個別に分母 0 になる境界ケース ── 予測のみ空、GT のみ空 ── は
+    従来どおり「比較対象が無いので一致とみなす（1.0）」を維持する。iou_denom はゼロにならない
+    ため、この関数の分岐には影響しない）。
+
     F1 は precision/recall の調和平均。両方が 0 の場合のみ 0.0 とする。
     """
     tp = int(np.count_nonzero(pred_bool & gt_bool))
     fp = int(np.count_nonzero(pred_bool & ~gt_bool))
     fn = int(np.count_nonzero(~pred_bool & gt_bool))
+    support = tp + fn
 
     iou_denom = tp + fp + fn
-    iou = 1.0 if iou_denom == 0 else tp / iou_denom
+    if iou_denom == 0:
+        return {
+            "iou": None,
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "support": support,
+            "valid_pixels": valid_pixels,
+        }
+    iou = tp / iou_denom
 
     precision_denom = tp + fp
     precision = 1.0 if precision_denom == 0 else tp / precision_denom
@@ -92,7 +123,17 @@ def _confusion_metrics(pred_bool: np.ndarray, gt_bool: np.ndarray) -> RoleMetric
 
     f1 = 0.0 if (precision + recall) == 0 else 2 * precision * recall / (precision + recall)
 
-    return {"iou": iou, "precision": precision, "recall": recall, "f1": f1}
+    return {
+        "iou": iou,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "support": support,
+        "valid_pixels": valid_pixels,
+    }
+
+
+_METRIC_KEYS: tuple[str, ...] = ("iou", "precision", "recall", "f1")
 
 
 def macro_average_decompose_metrics(per_page: Sequence[DecomposeMetrics]) -> DecomposeMetrics:
@@ -101,21 +142,73 @@ def macro_average_decompose_metrics(per_page: Sequence[DecomposeMetrics]) -> Dec
     ページによって出現するロールが異なっていてもよい（そのロールの値があったページだけで
     平均する）。入力が空、またはどのページにもロールが1つも無ければ空 dict を返す
     （ゼロ除算は起きない）。
+
+    各ページの各ロールの `iou`/`precision`/`recall`/`f1` が `None`（値なし。Review #18）の
+    場合、そのページはそのロールの平均対象から**除外**する（0 として混入させない）。
+    ロールが出現した全ページで値なしだった場合、そのロールの平均値も `None` になる。
+    `support`/`valid_pixels` は全ページの合計値を返す（値なしのページも含めて集計対象の
+    規模が分かるようにするため）。
     """
     sums: dict[str, dict[str, float]] = {}
-    counts: dict[str, int] = {}
+    value_counts: dict[str, dict[str, int]] = {}
+    support_totals: dict[str, int] = {}
+    valid_pixel_totals: dict[str, int] = {}
 
     for page_metrics in per_page:
         for role, metrics in page_metrics.items():
-            role_sums = sums.setdefault(role, {"iou": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0})
-            for key, value in metrics.items():
-                role_sums[key] += value
-            counts[role] = counts.get(role, 0) + 1
+            role_sums = sums.setdefault(role, {key: 0.0 for key in _METRIC_KEYS})
+            role_counts = value_counts.setdefault(role, {key: 0 for key in _METRIC_KEYS})
+            for key in _METRIC_KEYS:
+                value = metrics.get(key)
+                if value is not None:
+                    role_sums[key] += value
+                    role_counts[key] += 1
+            support_totals[role] = support_totals.get(role, 0) + (metrics.get("support") or 0)
+            valid_pixel_totals[role] = valid_pixel_totals.get(role, 0) + (metrics.get("valid_pixels") or 0)
 
-    return {
-        role: {key: value / counts[role] for key, value in role_sums.items()}
-        for role, role_sums in sums.items()
-    }
+    result: DecomposeMetrics = {}
+    for role, role_sums in sums.items():
+        role_counts = value_counts[role]
+        result[role] = {
+            key: (role_sums[key] / role_counts[key] if role_counts[key] > 0 else None)
+            for key in _METRIC_KEYS
+        }
+        result[role]["support"] = support_totals[role]
+        result[role]["valid_pixels"] = valid_pixel_totals[role]
+    return result
+
+
+def compute_page_decompose_metrics(
+    page_id: str,
+    masks: Mapping[str, np.ndarray],
+    balloon_mask: np.ndarray,
+) -> DecomposeMetrics | None:
+    """1ページ分の分解器指標を、GT マッピングが存在する場合のみ算出する。
+
+    `api.routes_analyze.analyze_page` と `core.batch._process_page` はいずれも
+    除外マスクの組み立て（`gt["text"]` とフキダシ損失マスクの和集合）・GT 未保存時の
+    `None` 返却まで完全に同一のコードを個別に持っていた（Review #25）。この関数へ集約し、
+    呼び出し側はこれを呼ぶだけにすることで除外規則が食い違う余地を無くす。
+
+    Args:
+        page_id: `workspace/gt/<page_id>.json`（GT マッピング）を参照するためのページID。
+        masks: `core.decompose.decompose()` の戻り値相当（`{"line": ..., "fill": ..., "tone": ...}`）。
+        balloon_mask: `core.balloons.detect_balloons()` の戻り値（フキダシ損失マスク）。
+
+    Returns:
+        GT マッピング未保存（`workspace/gt/<page_id>.json` が無い）、または GT マスク生成に
+        必要な元 PSD が見つからない等の場合は `None`。それ以外は `decompose_metrics()` の
+        戻り値（評価対象から `gt["text"]` とフキダシ損失マスクの和集合を除外して算出）。
+    """
+    gt_path = get_gt_dir(create=False) / f"{page_id}.json"
+    if not gt_path.is_file():
+        return None
+    try:
+        gt_masks = gt_module.build_gt_masks(page_id)
+    except (gt_module.PageNotFoundError, gt_module.GTMappingError):
+        return None
+    exclude_mask = (((gt_masks["text"] > 0) | (balloon_mask > 0)).astype(np.uint8)) * 255
+    return decompose_metrics(masks, gt_masks, exclude_mask=exclude_mask)
 
 
 def panel_flag_metrics(panels_by_page: Mapping[str, Sequence[PanelInfo]]) -> dict:

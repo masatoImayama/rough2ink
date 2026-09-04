@@ -42,14 +42,13 @@ from typing import Literal
 
 import numpy as np
 
-from rough2ink.core import gt as gt_module
 from rough2ink.core import imageio
 from rough2ink.core.balloons import detect_balloons
-from rough2ink.core.config import get_gt_dir, get_out_dir, get_workspace_dir
+from rough2ink.core.config import get_out_dir, get_workspace_dir
 from rough2ink.core.decompose import decompose
 from rough2ink.core.loaders import load_image, load_pdf, load_psd
 from rough2ink.core.metrics import (
-    decompose_metrics,
+    compute_page_decompose_metrics,
     macro_average_decompose_metrics,
     panel_flag_metrics,
 )
@@ -205,7 +204,7 @@ def _process_page(doc: PageDocument, out_dir: Path, params: AnalysisParams) -> P
     _write_panel_crops(gray, panels, page_out_dir / "panels")
 
     _persist_workspace_meta(doc)
-    metrics = _compute_decompose_metrics(doc, masks, balloon_mask)
+    metrics = compute_page_decompose_metrics(doc.page_id, masks, balloon_mask)
     if metrics is not None:
         (page_out_dir / "metrics.json").write_text(
             json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -261,21 +260,6 @@ def _persist_workspace_meta(doc: PageDocument) -> None:
     )
 
 
-def _compute_decompose_metrics(
-    doc: PageDocument, masks: dict[str, np.ndarray], balloon_mask: np.ndarray
-) -> dict | None:
-    """GT マッピング（`workspace/gt/<page_id>.json`）が存在する場合のみ分解器指標を算出する。"""
-    gt_path = get_gt_dir(create=False) / f"{doc.page_id}.json"
-    if not gt_path.is_file():
-        return None
-    try:
-        gt_masks = gt_module.build_gt_masks(doc.page_id)
-    except (gt_module.PageNotFoundError, gt_module.GTMappingError):
-        return None
-    exclude_mask = (((gt_masks["text"] > 0) | (balloon_mask > 0)).astype(np.uint8)) * 255
-    return decompose_metrics(masks, gt_masks, exclude_mask=exclude_mask)
-
-
 def _build_report(page_results: list[PageResult]) -> dict:
     """全ページの `PageResult` から `report.json` 相当の集計 dict を組み立てる。"""
     included = [r for r in page_results if r.status == "included"]
@@ -323,14 +307,21 @@ def _render_report_md(report: dict) -> str:
     lines.append("")
     macro = report["decompose_macro_average"]
     if macro:
-        lines.append("| role | iou | precision | recall | f1 |")
-        lines.append("|---|---|---|---|---|")
+        # iou 等が None（算出不能。Review #18: そのロールが評価対象内で予測にも GT にも
+        # 一切出現しなかった。「値が出ないこと」を満点と区別する）の場合は「算出不能」と表示する。
+        lines.append("| role | iou | precision | recall | f1 | support | valid_pixels |")
+        lines.append("|---|---|---|---|---|---|---|")
         for role in ("line", "fill", "tone"):
             if role not in macro:
                 continue
             m = macro[role]
+            iou_cell = "算出不能" if m["iou"] is None else f"{m['iou']:.3f}"
+            precision_cell = "算出不能" if m["precision"] is None else f"{m['precision']:.3f}"
+            recall_cell = "算出不能" if m["recall"] is None else f"{m['recall']:.3f}"
+            f1_cell = "算出不能" if m["f1"] is None else f"{m['f1']:.3f}"
             lines.append(
-                f"| {role} | {m['iou']:.3f} | {m['precision']:.3f} | {m['recall']:.3f} | {m['f1']:.3f} |"
+                f"| {role} | {iou_cell} | {precision_cell} | {recall_cell} | {f1_cell} "
+                f"| {m['support']} | {m['valid_pixels']} |"
             )
     else:
         lines.append("GT が割り当てられたページが無いため算出できません。")

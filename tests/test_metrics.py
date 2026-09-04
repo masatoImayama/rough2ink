@@ -40,7 +40,15 @@ def test_decompose_metrics_perfect_match_gives_iou_one() -> None:
 
     result = decompose_metrics(pred, gt)
 
-    assert result["line"] == {"iou": 1.0, "precision": 1.0, "recall": 1.0, "f1": 1.0}
+    # line: 25px 完全一致（support=tp+fn=25、valid_pixels=画像全体 100px、除外なし）。
+    assert result["line"] == {
+        "iou": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 25,
+        "valid_pixels": 100,
+    }
 
 
 def test_decompose_metrics_complete_mismatch_gives_iou_zero() -> None:
@@ -90,20 +98,39 @@ def test_decompose_metrics_excludes_text_and_balloon_regions() -> None:
 
     exclude_mask = _mask(slice(5, 10), slice(5, 10))  # text 領域 or フキダシ損失マスク相当
     with_exclude = decompose_metrics(pred, gt, exclude_mask=exclude_mask)
-    assert with_exclude["line"] == {"iou": 1.0, "precision": 1.0, "recall": 1.0, "f1": 1.0}
+    # 除外後: 一致部分 25px（support=tp+fn=25）、valid_pixels=100px中 exclude_mask の25px を除いた75px。
+    assert with_exclude["line"] == {
+        "iou": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 25,
+        "valid_pixels": 75,
+    }
 
 
 # --- decompose_metrics: 境界ケースのゼロ除算 ----------------------------------
 
 
-def test_decompose_metrics_both_empty_is_safe_and_perfect() -> None:
+def test_decompose_metrics_both_empty_is_safe_and_returns_no_data() -> None:
+    """GT にも予測にも一切存在しないロール（該当画素が pred/gt どちらにも無い）は、
+    「比較対象が無いので満点」ではなく「値なし（None）」を返す（Review #18）。1.0 で
+    水増しするとマクロ平均が実力より高く出るため、空虚な 1.0 と真の 1.0 を区別する。
+    """
     pred = {"line": _empty(), "fill": _empty(), "tone": _empty()}
     gt = {"line": _empty(), "fill": _empty(), "tone": _empty()}
 
     result = decompose_metrics(pred, gt)
 
     for metrics in result.values():
-        assert metrics == {"iou": 1.0, "precision": 1.0, "recall": 1.0, "f1": 1.0}
+        assert metrics == {
+            "iou": None,
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "support": 0,
+            "valid_pixels": 100,
+        }
 
 
 def test_decompose_metrics_pred_empty_gt_nonempty_no_exception() -> None:
@@ -131,6 +158,11 @@ def test_decompose_metrics_gt_empty_pred_nonempty_no_exception() -> None:
 
 
 def test_decompose_metrics_all_excluded_is_safe() -> None:
+    """全画素が除外され評価対象が無い場合も「値なし（None）」を返す（Review #18）。
+    従来は 1.0（満点）で安全とみなしていたが、これは #15（フキダシ損失マスクがページ全面を
+    覆う）と組み合わさると report.json 全体が偽の満点になる欠陥だった。
+    valid_pixels=0 が「評価対象が無かった」ことを明示する。
+    """
     pred = {"line": _mask(slice(0, 5), slice(0, 5)), "fill": _empty(), "tone": _empty()}
     gt = {"line": _mask(slice(5, 10), slice(5, 10)), "fill": _empty(), "tone": _empty()}
     exclude_mask = np.full(_SHAPE, 255, dtype=np.uint8)  # 全画素を除外
@@ -138,7 +170,14 @@ def test_decompose_metrics_all_excluded_is_safe() -> None:
     result = decompose_metrics(pred, gt, exclude_mask=exclude_mask)
 
     for metrics in result.values():
-        assert metrics == {"iou": 1.0, "precision": 1.0, "recall": 1.0, "f1": 1.0}
+        assert metrics == {
+            "iou": None,
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "support": 0,
+            "valid_pixels": 0,
+        }
 
 
 def test_decompose_metrics_only_computes_roles_present_in_both() -> None:
@@ -164,7 +203,63 @@ def test_macro_average_decompose_metrics_averages_across_pages() -> None:
 
     averaged = macro_average_decompose_metrics([page1, page2])
 
-    assert averaged["line"] == {"iou": 0.5, "precision": 0.5, "recall": 0.5, "f1": 0.5}
+    # 入力に support/valid_pixels が無い場合は 0 として集計される（.get 既定値）。
+    assert averaged["line"] == {
+        "iou": 0.5,
+        "precision": 0.5,
+        "recall": 0.5,
+        "f1": 0.5,
+        "support": 0,
+        "valid_pixels": 0,
+    }
+
+
+def test_macro_average_decompose_metrics_excludes_no_data_pages_from_average() -> None:
+    """あるページのロールが「値なし」（None。GT にも予測にも存在しないロール）だった場合、
+    そのページを 0 として平均に混入させず、平均対象から除外する（Review #18 の核心）。
+    値ありのページだけで平均するため、macro 平均は「値なし」ページに影響されない。
+    """
+    page_with_data = {
+        "line": {"iou": 0.8, "precision": 0.8, "recall": 0.8, "f1": 0.8, "support": 10, "valid_pixels": 20},
+    }
+    page_without_data = {
+        "line": {
+            "iou": None,
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "support": 0,
+            "valid_pixels": 15,
+        },
+    }
+
+    averaged = macro_average_decompose_metrics([page_with_data, page_without_data])
+
+    # 値ありページ（page_with_data）だけの値がそのまま平均になる（0 で薄まらない）。
+    assert averaged["line"]["iou"] == pytest.approx(0.8)
+    assert averaged["line"]["precision"] == pytest.approx(0.8)
+    assert averaged["line"]["recall"] == pytest.approx(0.8)
+    assert averaged["line"]["f1"] == pytest.approx(0.8)
+    # support/valid_pixels は「値なし」ページも含めて合計する（集計規模を可視化するため）。
+    assert averaged["line"]["support"] == 10
+    assert averaged["line"]["valid_pixels"] == 35
+
+
+def test_macro_average_decompose_metrics_all_pages_no_data_returns_none() -> None:
+    """全ページで「値なし」だったロールは、マクロ平均も None（値なし）になる。
+    0.0 でも 1.0 でもない「算出不能」を維持する。
+    """
+    page1 = {"line": {"iou": None, "precision": None, "recall": None, "f1": None, "support": 0, "valid_pixels": 10}}
+    page2 = {"line": {"iou": None, "precision": None, "recall": None, "f1": None, "support": 0, "valid_pixels": 5}}
+
+    averaged = macro_average_decompose_metrics([page1, page2])
+
+    assert averaged["line"]["iou"] is None
+    assert averaged["line"]["precision"] is None
+    assert averaged["line"]["recall"] is None
+    assert averaged["line"]["f1"] is None
+    assert averaged["line"]["support"] == 0
+    assert averaged["line"]["valid_pixels"] == 15
 
 
 def test_macro_average_decompose_metrics_handles_missing_roles_per_page() -> None:

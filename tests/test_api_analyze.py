@@ -255,7 +255,9 @@ def _make_metrics_psd(path: Path) -> None:
     """全面が不透明黒の Fill レイヤー 1 枚だけを持つ PSD（GT 指標算出の疎通確認用）。
 
     `tests/test_batch.py::_make_metrics_psd` と同じ構成
-    （`core.batch._compute_decompose_metrics` と揃える契約の検証のため）。
+    （`core.metrics.compute_page_decompose_metrics` を両者が共通で呼ぶ契約の検証のため。
+    Review #25: 除外規則の二重実装を無くしたので、この関数は routes_analyze と
+    batch のどちらの経路でも同一の計算になる）。
     """
     psd = PSDImage.new("RGBA", (60, 60), color=(255, 255, 255, 255))
     group = Group.new(psd, "Group1")
@@ -299,3 +301,13 @@ def test_analyze_returns_metrics_when_gt_mapping_exists(tmp_path: Path, monkeypa
     assert metrics["fill"]["precision"] == pytest.approx(1.0)
     assert metrics["fill"]["recall"] == pytest.approx(1.0)
     assert metrics["fill"]["f1"] == pytest.approx(1.0)
+    assert metrics["fill"]["support"] > 0
+
+    # line/tone: GT にも予測にも該当画素が無いロール（Review #18）。1.0（満点）で
+    # 水増しせず None（値なし）を返す。tests/test_batch.py の同名シナリオと揃える。
+    for role in ("line", "tone"):
+        assert metrics[role]["iou"] is None
+        assert metrics[role]["precision"] is None
+        assert metrics[role]["recall"] is None
+        assert metrics[role]["f1"] is None
+        assert metrics[role]["support"] == 0

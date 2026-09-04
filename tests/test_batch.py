@@ -259,6 +259,57 @@ def test_run_batch_computes_metrics_when_gt_mapping_exists(tmp_path: Path, monke
     assert "| fill |" in report_md
 
 
+def test_run_batch_role_absent_in_both_is_excluded_from_macro_average(tmp_path: Path, monkeypatch) -> None:
+    """Review #18: フィクスチャは全面が不透明黒の Fill レイヤーのみ（`line`/`tone` に対応する
+    レイヤーが GT に無い）。分解結果側も全域が `fill` に分類され `line`/`tone` は検出されない
+    ため、`line`/`tone` は「GT にも予測にも存在しないロール」になる。これが 1.0（満点）として
+    マクロ平均に混入しない（`None` として除外される）ことを実測で確認する。
+    """
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    input_dir = tmp_path / "in"
+    input_dir.mkdir()
+    out_dir = tmp_path / "out"
+
+    psd_path = input_dir / "art.psd"
+    _make_metrics_psd(psd_path)
+    params = AnalysisParams(quality=QualityParams(min_short_side=1))
+
+    run_batch(input_dir, out_dir, params)  # 1回目: workspace/pages/art/meta.json を永続化
+    gt.save_mapping("art", {"Group1/FillLayer": "fill"})  # line/tone は未割当のまま
+    report = run_batch(input_dir, out_dir, params)  # 2回目: metrics.json が書かれる
+
+    metrics = json.loads((out_dir / "art" / "metrics.json").read_text(encoding="utf-8"))
+
+    # line/tone: 予測にも GT にも該当画素が無いため「値なし」（1.0 で水増しされない）。
+    for role in ("line", "tone"):
+        assert metrics[role]["iou"] is None, f"{role} の iou は None のはずが {metrics[role]['iou']!r}"
+        assert metrics[role]["precision"] is None
+        assert metrics[role]["recall"] is None
+        assert metrics[role]["f1"] is None
+        assert metrics[role]["support"] == 0  # GT 陽性画素が無い
+        assert metrics[role]["valid_pixels"] > 0  # 評価対象自体は存在する（page 全域）
+
+    # fill: 実際に画素が一致しているため通常どおり数値が出る。
+    assert metrics["fill"]["iou"] == pytest.approx(1.0)
+    assert metrics["fill"]["support"] > 0
+
+    # マクロ平均: line/tone は「値なし」ページしか無いため None（0 や 1.0 に丸め込まれない）。
+    macro = report["decompose_macro_average"]
+    for role in ("line", "tone"):
+        assert macro[role]["iou"] is None, (
+            f"{role} のマクロ平均 iou は None（算出不能）のはずが {macro[role]['iou']!r} "
+            "だった。分母0のロールが満点として混入している（Review #18 の回帰）。"
+        )
+        assert macro[role]["support"] == 0
+    assert macro["fill"]["iou"] == pytest.approx(1.0)
+
+    # report.md: line/tone の行は「算出不能」と明示される（数値の 1.000 にならない）。
+    report_md = (out_dir / "report.md").read_text(encoding="utf-8")
+    assert "| line | 算出不能 | 算出不能 | 算出不能 | 算出不能 " in report_md
+    assert "| tone | 算出不能 | 算出不能 | 算出不能 | 算出不能 " in report_md
+    assert "| fill | 1.000 |" in report_md
+
+
 def test_run_batch_raises_for_missing_input_dir(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
 
