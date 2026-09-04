@@ -9,10 +9,11 @@ from __future__ import annotations
 import io
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from rough2ink.core.params import QualityParams
-from rough2ink.core.quality import evaluate_quality
+from rough2ink.core.quality import _compute_jpeg_block_score, evaluate_quality
 
 
 def _synthetic_photo(size: int = 256, seed: int = 0) -> np.ndarray:
@@ -143,3 +144,50 @@ def test_default_params_used_when_omitted() -> None:
 
     assert report.status == "fail"
     assert any("short_side" in reason for reason in report.reasons)
+
+
+def test_jpeg_block_score_flat_blocks_with_boundary_steps_is_not_zero() -> None:
+    """ブロック内部が完全に平坦（非境界勾配ゼロ）でも、境界に段差があればスコアが0へ潰れない。
+
+    強い JPEG 量子化の典型的な帰結（ブロック内部が完全に平坦）を市松模様で再現する。
+    #19 でメモリ使用量を削減する際に、境界／非境界の集計方法（連結コピー -> 総和・件数の
+    累積）を変えてもこの eps ガードの挙動を壊していないことを確認する回帰テスト。
+    """
+    block = 8
+    n_blocks = 20
+    row_idx = np.arange(n_blocks)[:, None]
+    col_idx = np.arange(n_blocks)[None, :]
+    block_values = ((row_idx + col_idx) % 2 * 200 + 20).astype(np.uint8)
+    gray = np.repeat(np.repeat(block_values, block, axis=0), block, axis=1)
+
+    score = _compute_jpeg_block_score(gray, block_size=block)
+
+    assert score > 0.0
+
+
+def test_jpeg_block_score_memory_stays_bounded_for_large_image() -> None:
+    """5000x7000px の巨大画像でも peak RSS の増分が入力サイズの数倍程度に収まる（Review #19）。
+
+    修正前は float64 昇格 + 境界/非境界の連結コピーにより、レビュー時点の実測で
+    入力の約33倍（増分1164MB）まで膨らんでいた。int16 での差分計算とチャンク処理により、
+    これを大きく下回ることを確認する。
+    """
+    resource = pytest.importorskip("resource", reason="peak RSS 計測は POSIX の resource モジュールに依存する")
+
+    rng = np.random.default_rng(11)
+    gray = rng.integers(0, 256, size=(5000, 7000), dtype=np.uint8)
+    input_bytes = gray.nbytes
+
+    before_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    score = _compute_jpeg_block_score(gray)
+    after_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    increment_bytes = max(0, (after_kb - before_kb) * 1024)
+
+    assert isinstance(score, float)
+    # 修正前の実測（増分1164MB、入力の約33倍）を大きく下回ることを確認する。
+    # 環境差によるブレを許容しつつ、明確な改善を検証するため入力サイズの10倍を上限とする。
+    assert increment_bytes < input_bytes * 10, (
+        f"increment={increment_bytes / 1024 / 1024:.1f}MB "
+        f"input={input_bytes / 1024 / 1024:.1f}MB"
+    )

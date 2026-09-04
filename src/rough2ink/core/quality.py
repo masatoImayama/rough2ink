@@ -19,6 +19,11 @@ from rough2ink.core.types import QualityReport
 
 _JPEG_BLOCK_SIZE = 8
 
+# `_compute_jpeg_block_score` を行方向にチャンクして走査する際の目安バイト数。
+# チャンク 1 つあたりの int16 差分配列がこの程度に収まる行数を選ぶ
+# （5000x7000px でもピークメモリを入力の数倍程度に抑えるため。Review #19）。
+_MEMORY_CHUNK_TARGET_BYTES = 8 * 1024 * 1024
+
 # fail 閾値の手前で早期に注意喚起するための warn マージン。
 # UI で閾値調整の参考にできるよう、境界に近い素材を pass と fail の間で区別する
 # （Epic 仕様書「各指標の生の数値も併せて返す（閾値調整のため UI に出す）」）。
@@ -41,32 +46,63 @@ def _compute_jpeg_block_score(gray: np.ndarray, block_size: int = _JPEG_BLOCK_SI
     JPEG は `block_size` 画素単位で DCT 量子化するため、圧縮が強いほど
     ブロック境界に不自然な段差（勾配の跳ね上がり）が現れる。
     境界位置の勾配が非境界位置に比べて有意に大きいほどスコアが上がる。
-    """
-    img = gray.astype(np.float64)
-    height, width = img.shape
 
-    # 横方向: 列 i-1, i 間の勾配。位置 i が block_size の倍数なら格子境界。
-    dx = np.abs(np.diff(img, axis=1))  # shape (H, W-1)
+    メモリ方針（Review #19）: 入力を float64 に昇格させず int16 のまま差分を取り、
+    境界／非境界の平均は配列を連結せずに総和と件数を累積して求める。さらに行方向に
+    チャンクして走査することで、ピークメモリを入力サイズの数倍程度に抑える
+    （5000x7000px で peak RSS 増分 1164MB だったものを大幅に削減する）。
+    """
+    height, width = gray.shape
+
     col_positions = np.arange(1, width)
     boundary_cols = col_positions % block_size == 0
+    nonboundary_cols = ~boundary_cols
 
-    # 縦方向: 行 i-1, i 間の勾配。位置 i が block_size の倍数なら格子境界。
-    dy = np.abs(np.diff(img, axis=0))  # shape (H-1, W)
     row_positions = np.arange(1, height)
     boundary_rows = row_positions % block_size == 0
 
-    boundary_values = np.concatenate(
-        [dx[:, boundary_cols].ravel(), dy[boundary_rows, :].ravel()]
-    )
-    nonboundary_values = np.concatenate(
-        [dx[:, ~boundary_cols].ravel(), dy[~boundary_rows, :].ravel()]
-    )
+    boundary_sum = 0
+    boundary_count = 0
+    nonboundary_sum = 0
+    nonboundary_count = 0
 
-    if boundary_values.size == 0 or nonboundary_values.size == 0:
+    chunk_height = max(1, _MEMORY_CHUNK_TARGET_BYTES // max(width * 2, 1))
+
+    for start in range(0, height, chunk_height):
+        end = min(start + chunk_height, height)
+        chunk = gray[start:end].astype(np.int16)  # このチャンク分のみコピーする
+
+        # 横方向: 列 i-1, i 間の勾配。チャンク内で完結するので追加の行は不要。
+        dx = np.abs(np.diff(chunk, axis=1))  # shape (end-start, W-1)
+        boundary_sum += int(dx[:, boundary_cols].sum())
+        boundary_count += int(dx[:, boundary_cols].size)
+        nonboundary_sum += int(dx[:, nonboundary_cols].sum())
+        nonboundary_count += int(dx[:, nonboundary_cols].size)
+        del dx
+
+        # 縦方向: 行 i-1, i 間の勾配。チャンク末尾の行は次の行との差分が必要なので、
+        # 最終チャンクでなければ 1 行分余分に読み込む。
+        if end < height:
+            dy_source = gray[start : end + 1].astype(np.int16)
+            row_mask = boundary_rows[start:end]
+        else:
+            dy_source = chunk
+            row_mask = boundary_rows[start : max(end - 1, start)]
+
+        if row_mask.size > 0:
+            dy = np.abs(np.diff(dy_source, axis=0))  # shape (len(row_mask), W)
+            boundary_sum += int(dy[row_mask, :].sum())
+            boundary_count += int(dy[row_mask, :].size)
+            boundary_nonrows = ~row_mask
+            nonboundary_sum += int(dy[boundary_nonrows, :].sum())
+            nonboundary_count += int(dy[boundary_nonrows, :].size)
+            del dy
+
+    if boundary_count == 0 or nonboundary_count == 0:
         return 0.0
 
-    boundary_mean = float(boundary_values.mean())
-    nonboundary_mean = float(nonboundary_values.mean())
+    boundary_mean = boundary_sum / boundary_count
+    nonboundary_mean = nonboundary_sum / nonboundary_count
 
     # 非境界勾配が 0（ブロック内部が完全に平坦）になるのは強い JPEG 量子化の典型的な帰結であり、
     # 境界勾配がわずかでも残っていればブロックノイズの明確な証拠になる。
