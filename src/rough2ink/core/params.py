@@ -19,13 +19,19 @@ class QualityParams(BaseModel):
 
 
 class ToneParams(BaseModel):
-    """B. 分解器: トーン検出（周波数解析）用パラメータ。"""
+    """B. 分解器: トーン検出（周波数解析）用パラメータ。
+
+    `energy_threshold` は帯域に有意なエネルギーがあるかを見る前段フィルタ、
+    `sharpness_threshold` は帯域内スペクトルの尖鋭度（周期性）を見る主判定で、
+    網点のような孤立ピークを持つブロックだけをトーンとして採用する（#16）。
+    """
 
     window: int = 64
     stride: int = 32
     bandpass_low: float = 0.08
     bandpass_high: float = 0.45
     energy_threshold: float = 0.20
+    sharpness_threshold: float = 1500.0
 
 
 class FillParams(BaseModel):
