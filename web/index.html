@@ -8,9 +8,88 @@
 </head>
 <body>
   <h1>rough2ink 前処理検証ツール（Phase 0 素材検証）</h1>
-  <p>
-    このページはプレースホルダです。UI（アップロード・オーバーレイ表示・
-    パラメータスライダー・GT レイヤーマッピング）は後続タスクで実装します。
-  </p>
+
+  <section id="upload-section">
+    <h2>1. アップロード</h2>
+    <form id="upload-form">
+      <input id="file-input" type="file" accept=".png,.jpg,.jpeg,.psd,.pdf" required />
+      <button type="submit">アップロード</button>
+    </form>
+    <p id="upload-status" class="status"></p>
+  </section>
+
+  <div id="main-layout">
+    <aside id="sidebar">
+      <section id="page-section">
+        <h2>2. ページ一覧</h2>
+        <ul id="page-list"></ul>
+        <p id="page-status" class="status"></p>
+      </section>
+
+      <section id="layer-section">
+        <h2>3. PSD レイヤー役割マッピング</h2>
+        <div id="layer-mapping"></div>
+        <p id="gt-status" class="status"></p>
+      </section>
+
+      <section id="preset-section">
+        <h2>4. プリセット</h2>
+        <div id="preset-controls"></div>
+      </section>
+
+      <section id="param-section">
+        <h2>5. パラメータ</h2>
+        <div id="param-controls"></div>
+      </section>
+    </aside>
+
+    <main id="viewer">
+      <section id="overlay-section">
+        <h2>6. オーバーレイ表示</h2>
+        <p id="analysis-status" class="status"></p>
+
+        <div id="layer-toggles">
+          <label class="layer-toggle layer-toggle--line">
+            <input id="layer-line-visible" type="checkbox" checked />
+            線
+            <input id="layer-line-opacity" type="range" min="0" max="1" step="0.05" value="0.6" />
+          </label>
+          <label class="layer-toggle layer-toggle--fill">
+            <input id="layer-fill-visible" type="checkbox" checked />
+            ベタ
+            <input id="layer-fill-opacity" type="range" min="0" max="1" step="0.05" value="0.6" />
+          </label>
+          <label class="layer-toggle layer-toggle--tone">
+            <input id="layer-tone-visible" type="checkbox" checked />
+            トーン
+            <input id="layer-tone-opacity" type="range" min="0" max="1" step="0.05" value="0.6" />
+          </label>
+          <label class="layer-toggle layer-toggle--panel">
+            <input id="layer-panel-visible" type="checkbox" checked />
+            コマポリゴン
+            <input id="layer-panel-opacity" type="range" min="0" max="1" step="0.05" value="1" />
+          </label>
+          <label class="layer-toggle layer-toggle--balloon">
+            <input id="layer-balloon-visible" type="checkbox" checked />
+            フキダシ
+            <input id="layer-balloon-opacity" type="range" min="0" max="1" step="0.05" value="0.4" />
+          </label>
+        </div>
+
+        <div id="canvas-wrap">
+          <canvas id="overlay-canvas"></canvas>
+        </div>
+      </section>
+
+      <section id="metrics-section">
+        <h2>7. 指標</h2>
+        <div id="quality-report"></div>
+        <div id="panel-metrics"></div>
+        <div id="gt-metrics"></div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/js/app.js"></script>
 </body>
 </html>
