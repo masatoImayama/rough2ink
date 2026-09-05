@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from rough2ink.core.balloons import detect_balloons
-from rough2ink.core.params import BalloonParams
+from rough2ink.core.params import AnalysisParams, BalloonParams
 
 _SIZE = 200
 _PAGE_BACKGROUND = 255  # 実原稿と同じ白いページ背景（画像の外周まで達する）
@@ -344,3 +344,55 @@ def test_panel_border_barrier_does_not_reintroduce_whole_page_coverage() -> None
 
     coverage = float(np.count_nonzero(mask)) / mask.size
     assert coverage < 0.3, f"loss mask covers {coverage:.4f} of page (expected < 0.3)"
+
+
+def test_white_artwork_is_dropped_when_text_rects_are_available() -> None:
+    """テキスト矩形が使えるとき、セリフと重ならない白領域を候補から外すこと。
+
+    実原稿の PSD で、モニタ画面・白い床・明るい背景といった**絵の中の白い領域**が
+    フキダシと誤検出され、損失マスクがページの 27.6% を覆い、全インクの 14.5% が
+    学習・評価から外れていた。フキダシにはほぼ必ずセリフが入るので、セリフと
+    重ならない白領域はフキダシではないとみなせる。
+    """
+    shape = (400, 600)
+    gray = np.full(shape, 0, dtype=np.uint8)  # 黒地（コマの中身）
+    # 左: セリフ入りのフキダシ（白）
+    cv2.ellipse(gray, (150, 200), (90, 60), 0, 0, 360, _PAGE_BACKGROUND, -1)
+    # 右: セリフの無い白い領域（モニタ画面のつもり）
+    cv2.rectangle(gray, (380, 140), (540, 260), _PAGE_BACKGROUND, -1)
+
+    params = AnalysisParams().balloon
+    # フキダシの中にだけテキスト矩形がある。
+    text_rects = [(120, 180, 60, 40)]
+
+    with_gate = detect_balloons(gray, params, text_rects) > 0
+    without_gate = (
+        detect_balloons(
+            gray, params.model_copy(update={"require_text_overlap": False}), text_rects
+        )
+        > 0
+    )
+
+    # フキダシ側はどちらでも覆われる。
+    assert with_gate[200, 150], "セリフ入りのフキダシは覆われるべき"
+    # セリフの無い白領域は、ゲートありでは覆われない。
+    assert not with_gate[200, 460], "セリフと重ならない白領域が覆われている"
+    assert without_gate[200, 460], "ゲート無効時は従来どおり覆う前提が崩れている"
+    assert with_gate.mean() < without_gate.mean()
+
+
+def test_gate_is_not_applied_without_text_rects() -> None:
+    """テキスト矩形が無い入力（画像 / PDF、セリフをラスタライズした原稿）では
+    絞り込みを行わず、従来どおり白領域の形状だけで判定すること。
+
+    ここで空集合として扱うと、フキダシが全て脱落してマスクが空になってしまう。
+    """
+    shape = (400, 600)
+    gray = np.full(shape, 0, dtype=np.uint8)
+    cv2.ellipse(gray, (150, 200), (90, 60), 0, 0, 360, _PAGE_BACKGROUND, -1)
+
+    params = AnalysisParams().balloon
+
+    for text_rects in (None, []):
+        mask = detect_balloons(gray, params, text_rects) > 0
+        assert mask[200, 150], f"text_rects={text_rects!r} でフキダシが検出されない"

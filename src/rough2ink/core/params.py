@@ -95,6 +95,10 @@ class BalloonParams(BaseModel):
     min_solidity: float = 0.90
     dilate_radius: int = 12
     text_rect_dilate: int = 24
+    # テキスト矩形が使えるとき、白領域由来の候補をセリフと重なるものに絞るか。
+    # 絵の中の白い領域（モニタ画面・白い床・明るい背景）の誤検出を落とす。
+    # PSD 入力でのみ効く（画像 / PDF はテキストレイヤーを持たない）。
+    require_text_overlap: bool = True
 
 
 class PreviewParams(BaseModel):

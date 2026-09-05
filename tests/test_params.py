@@ -50,6 +50,7 @@ EXPECTED_DEFAULTS: dict[str, dict[str, float | int]] = {
         "min_solidity": 0.90,
         "dilate_radius": 12,
         "text_rect_dilate": 24,
+        "require_text_overlap": True,
     },
     "preview": {
         "max_long_side": 1600,
