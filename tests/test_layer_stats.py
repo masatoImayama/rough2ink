@@ -144,3 +144,45 @@ def test_role_suggestion_endpoint_returns_initial_values(tmp_path: Path, monkeyp
     # ASCII の任意名は日本語キーワードに当たらないので未判定のまま。
     assert all(item["role"] is None for item in suggestions)
     assert all(item["matched_keyword"] is None for item in suggestions)
+
+
+def test_layer_mask_endpoint_returns_preview_sized_ink_mask(tmp_path: Path, monkeypatch) -> None:
+    """レイヤー1枚の墨をプレビュー解像度のマスクとして返すこと（GT割当中の位置確認用）。"""
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+    psd_path = tmp_path / "stats.psd"
+    _make_psd(psd_path)
+    page_id = _ingest(client, psd_path)
+
+    stats = client.get(f"/api/pages/{page_id}/layers/stats").json()
+    heavy = next(item for item in stats if item["path"].endswith("HeavyInk"))
+
+    response = client.get(f"/api/pages/{page_id}/layers/{heavy['layer_id']}/mask")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+
+
+def test_layer_mask_endpoint_404s_for_layers_without_ink(tmp_path: Path, monkeypatch) -> None:
+    """墨を持たないレイヤー（白抜き・空）は 404。強調表示しても何も見えないため。"""
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+    psd_path = tmp_path / "stats.psd"
+    _make_psd(psd_path)
+    page_id = _ingest(client, psd_path)
+
+    stats = client.get(f"/api/pages/{page_id}/layers/stats").json()
+    white = next(item for item in stats if item["path"].endswith("WhiteOnly"))
+
+    response = client.get(f"/api/pages/{page_id}/layers/{white['layer_id']}/mask")
+    assert response.status_code == 404
+
+
+def test_layer_mask_endpoint_rejects_path_traversal(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+    psd_path = tmp_path / "stats.psd"
+    _make_psd(psd_path)
+    page_id = _ingest(client, psd_path)
+
+    for bad in ("..%5C..%5Cevil", ".."):
+        assert client.get(f"/api/pages/{page_id}/layers/{bad}/mask").status_code == 404

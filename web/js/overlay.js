@@ -15,6 +15,9 @@ export const MASK_COLORS = {
   balloon: [160, 40, 200], // 紫
 };
 
+// GT 割当中に「そのレイヤーがページのどこか」を示すハイライト色（他のどの層とも重複しない橙）。
+export const LAYER_HIGHLIGHT_COLOR = [255, 140, 0];
+
 function loadImage(url) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -61,6 +64,8 @@ export class OverlayRenderer {
     this.baseImage = null;
     this.maskCanvases = {};
     this.panels = [];
+    // GT 割当中に強調表示する単一レイヤーのマスク（`null` なら表示しない）。
+    this.highlightCanvas = null;
     this.layerState = {
       line: { visible: true, opacity: 0.6 },
       fill: { visible: true, opacity: 0.6 },
@@ -120,6 +125,23 @@ export class OverlayRenderer {
     this.maskCanvases[kind] = tintMask(img, MASK_COLORS[kind]);
   }
 
+  /**
+   * GT 割当中のレイヤー1枚を強調表示する。`url` が `null` なら解除する。
+   *
+   * サムネイルはレイヤーの bbox しか映さないため、ページ上のどこを占めるかが分からない。
+   * 役割を決めるときに実際の位置を確認できるようにする。
+   */
+  async setHighlightLayer(url) {
+    if (!url) {
+      this.highlightCanvas = null;
+      this.redraw();
+      return;
+    }
+    const img = await loadImage(url);
+    this.highlightCanvas = tintMask(img, LAYER_HIGHLIGHT_COLOR);
+    this.redraw();
+  }
+
   /** `AnalysisResult.panels`（プレビュー座標系のポリゴンを含む）を設定する。 */
   setPanels(panels) {
     this.panels = panels;
@@ -140,6 +162,14 @@ export class OverlayRenderer {
       ctx.save();
       ctx.globalAlpha = state.opacity;
       ctx.drawImage(maskCanvas, 0, 0, this.canvas.width, this.canvas.height);
+      ctx.restore();
+    }
+
+    // 強調表示は他のオーバーレイより手前に描く（割当作業中に埋もれないように）。
+    if (this.highlightCanvas) {
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      ctx.drawImage(this.highlightCanvas, 0, 0, this.canvas.width, this.canvas.height);
       ctx.restore();
     }
 
