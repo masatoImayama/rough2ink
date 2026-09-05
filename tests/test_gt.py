@@ -353,3 +353,53 @@ def test_put_gt_mapping_returns_404_for_backslash_traversal_page_id(
     response = client.put("/api/pages/..\\..\\victim/gt", json={"mapping": {}})
 
     assert response.status_code == 404
+
+
+def _make_psd_with_white_filled_line_layer(path: Path) -> None:
+    """白で塗りつぶされた線画レイヤー（実原稿でよくある）を含む PSD を作る。
+
+    レイヤー全域が不透明で、その中に黒い線が引かれている状態。不透明かどうかだけで
+    GT を作ると、レイヤー全域がそのまま `line` になってしまう。
+    """
+    psd = PSDImage.new("RGBA", _PAGE_SIZE, color=(255, 255, 255, 255))
+    group = Group.new(psd, "Group1")
+
+    white = np.zeros((20, 20, 4), dtype=np.uint8)
+    white[:, :, :3] = 255  # 白で塗りつぶし
+    white[:, :, 3] = 255  # 全域不透明
+    white[9:11, :, :3] = 0  # 中央に黒い横線（これだけが「墨」）
+    PixelLayer.frompil(Image.fromarray(white, mode="RGBA"), group, "WhiteFilledLine", top=2, left=2)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    psd.save(str(path))
+
+
+def test_white_filled_layer_contributes_only_its_ink_to_gt(tmp_path: Path, monkeypatch) -> None:
+    """白で塗りつぶされた線画レイヤーは、墨の部分だけが GT に入ること。
+
+    不透明画素だけで判定していた頃は、実原稿1ページで GT の `line` がページの 73.6% を
+    占め（`集中線（円形）` のような全面レイヤーが丸ごと line になっていた）、指標が
+    まったく意味を持たない状態になっていた。
+    """
+    monkeypatch.setenv("ROUGH2INK_WORKSPACE_DIR", str(tmp_path / "ws"))
+    client = TestClient(app)
+
+    psd_path = tmp_path / "white_filled.psd"
+    _make_psd_with_white_filled_line_layer(psd_path)
+    with psd_path.open("rb") as fh:
+        response = client.post(
+            "/api/ingest", files={"file": ("white_filled.psd", fh, "image/vnd.adobe.photoshop")}
+        )
+    assert response.status_code == 200
+    page_id = response.json()[0]["page_id"]
+
+    layer_id = _layer_ids_by_name(client, page_id)["WhiteFilledLine"]
+    gt.save_mapping(page_id, {layer_id: "line"})
+
+    masks = gt.build_gt_masks(page_id)
+    line = masks["line"] > 0
+
+    # 黒い線の部分だけが line になる（レイヤーは 20x20 = 400px、線は 2x20 = 40px）。
+    assert line[11:13, 2:22].all(), "黒い線は line に入るべき"
+    assert not line[2:5, 2:22].any(), "白で塗りつぶされた部分が line になっている"
+    assert int(line.sum()) == 40, f"墨の画素数と一致するべき, got {int(line.sum())}"

@@ -20,6 +20,9 @@ from rough2ink.core.config import get_gt_dir, get_workspace_dir
 from rough2ink.core.loaders.psd_loader import _find_layer  # noqa: SLF001 -- ツリー走査を再利用
 from rough2ink.core.types import LayerRole
 
+# 墨が乗っているとみなす輝度の上限。`LineParams.black_threshold` と同じ既定値。
+_DEFAULT_INK_THRESHOLD = 128
+
 _MASK_ON = np.uint8(255)
 _MASK_OFF = np.uint8(0)
 
@@ -78,8 +81,21 @@ def load_mapping(page_id: str, *, require_page: bool = True) -> dict[str, LayerR
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def build_gt_masks(page_id: str) -> dict[str, np.ndarray]:
+def build_gt_masks(page_id: str, ink_threshold: int = _DEFAULT_INK_THRESHOLD) -> dict[str, np.ndarray]:
     """保存済みマッピングから GT マスクを生成する。
+
+    `line`/`fill`/`tone` は「**不透明かつ墨が乗っている**画素」を採用する。不透明かどうか
+    だけで判定すると、白で塗りつぶされた線画レイヤー（実原稿でよくある）がレイヤー全域
+    そのまま `line` になってしまう。実測では、実原稿1ページで GT の `line` がページの
+    73.6% を占め、指標がまったく意味を持たない状態になっていた。
+
+    `text` だけは不透明画素をそのまま使う。これは評価から**除外する**領域であり、
+    設計書 4-E 節の「マスクは過剰に広く取ってよい（誤検出のコストが非対称）」が
+    そのまま当てはまるため、フキダシの白地ごと除外するのが望ましい。
+
+    Args:
+        page_id: 対象ページ。
+        ink_threshold: 墨が乗っているとみなす輝度の上限（この値以下を採用）。
 
     Returns:
         `{"line": mask, "fill": mask, "tone": mask, "text": mask}`。
@@ -109,8 +125,10 @@ def build_gt_masks(page_id: str) -> dict[str, np.ndarray]:
         if role not in canvases:  # "ignore" および未知の役割は完全に無視する
             continue
         canvas = canvases[role]
+        # `text` は除外領域なので不透明画素をそのまま使う（広く取る方が安全）。
+        threshold = None if role == "text" else ink_threshold
         for layer_id in layer_ids:
-            _paint_opaque_pixels(psd, layer_id, canvas)
+            _paint_opaque_pixels(psd, layer_id, canvas, ink_threshold=threshold)
 
     fill = canvases["fill"]
     tone = canvases["tone"] & ~fill
@@ -128,9 +146,29 @@ def _to_mask(boolean: np.ndarray) -> np.ndarray:
     return np.where(boolean, _MASK_ON, _MASK_OFF)
 
 
-def _paint_opaque_pixels(psd: PSDImage, layer_id: str, canvas: np.ndarray) -> None:
-    """`layer_id`（`LayerInfo.id`）の不透明画素を、ページ原寸の `canvas`（bool, 論理和で更新）へ
+def _luminance(array: np.ndarray, bands: tuple[str, ...]) -> np.ndarray:
+    """レイヤーのラスタから輝度（0-255）を取り出す。
+
+    psd-tools が返すバンド構成はレイヤーによって異なる（`L` / `LA` / `RGB` / `RGBA` 等）。
+    アルファを除いたカラーバンドの平均を輝度として扱う。
+    """
+    color_indices = [index for index, band in enumerate(bands) if band != "A"]
+    if not color_indices:
+        # アルファのみのレイヤー（マスク等）。墨の有無を判定できないので全画素を採用する。
+        return np.zeros(array.shape[:2], dtype=np.uint8)
+    if array.ndim == 2:
+        return array
+    return array[:, :, color_indices].mean(axis=2)
+
+
+def _paint_opaque_pixels(
+    psd: PSDImage, layer_id: str, canvas: np.ndarray, *, ink_threshold: int | None = None
+) -> None:
+    """`layer_id`（`LayerInfo.id`）の画素を、ページ原寸の `canvas`（bool, 論理和で更新）へ
     書き込む。
+
+    `ink_threshold` を与えると「不透明**かつ**輝度が閾値以下（＝墨が乗っている）」画素だけを
+    採用する。`None` なら不透明画素をすべて採用する（除外領域を作る `text` 用）。
 
     `LayerInfo.path` ではなく `id` で解決するのは、同名レイヤーがあると path が衝突し、
     誤ったレイヤーの画素を焼き込んでしまうため（#20）。
@@ -155,6 +193,9 @@ def _paint_opaque_pixels(psd: PSDImage, layer_id: str, canvas: np.ndarray) -> No
     else:
         # アルファチャンネルを持たないレイヤー（背景等）は全画素を不透明として扱う。
         opaque = np.ones(array.shape[:2], dtype=bool)
+
+    if ink_threshold is not None:
+        opaque &= _luminance(array, bands) <= ink_threshold
 
     page_height, page_width = canvas.shape
     top_c, left_c = max(0, top), max(0, left)
