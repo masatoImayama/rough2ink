@@ -22,6 +22,7 @@ PanelFlag = Literal[
     "overflow",
     "spread",
     "effect_lines",
+    "irregular",
 ]
 ToneDepth = Literal["binary", "gray"]
 QualityStatus = Literal["pass", "warn", "fail"]

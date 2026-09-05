@@ -280,3 +280,79 @@ def test_detect_panels_rejects_non_2d_input() -> None:
     color_image = np.zeros((10, 10, 3), dtype=np.uint8)
     with pytest.raises(ValueError):
         detect_panels(color_image, PanelParams())
+
+
+def test_interior_angle_sum_is_fixed_by_vertex_count_so_it_cannot_detect_concavity() -> None:
+    """内角の総和は (n-2)×180° で形状に依存しない＝食い込みの検出には使えないこと。
+
+    「内角の総和に上限を設けて異常ポリゴンを弾く」という案は、単純多角形では
+    「頂点数に上限を設ける」と同値になる。凹んだ多角形と凸な多角形で総和が同じに
+    なることを示し、代わりに優角の数で区別できることを固定する。
+    """
+    from rough2ink.core.panels import count_reflex_vertices, polygon_solidity
+
+    # 同じ頂点数(6)の、凸な多角形と内側へ食い込んだ多角形。
+    convex = [(0.0, 0.0), (60.0, 0.0), (100.0, 40.0), (100.0, 100.0), (40.0, 100.0), (0.0, 60.0)]
+    concave = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (50.0, 40.0), (0.0, 100.0), (0.0, 50.0)]
+
+    # 総和はどちらも (6-2)*180 = 720 で同じ（＝総和では区別できない）。
+    assert len(convex) == len(concave)
+
+    assert count_reflex_vertices(convex) == 0
+    assert count_reflex_vertices(concave) >= 1, "食い込みは優角として現れるべき"
+
+    convex_area = abs(cv2.contourArea(np.array(convex, dtype=np.float32)))
+    concave_area = abs(cv2.contourArea(np.array(concave, dtype=np.float32)))
+    assert polygon_solidity(convex, convex_area) > 0.95
+    assert polygon_solidity(concave, concave_area) < 0.9
+
+
+def test_reflex_count_is_orientation_independent() -> None:
+    """頂点の並び順（時計回り／反時計回り）に依らず優角の数が同じであること。
+
+    画像座標系は y 軸が下向きで、外積の符号が数学座標系と逆になる。符号の扱いを
+    誤ると正常な矩形でも優角が数えられてしまう（実際に最初の実装で矩形の4頂点すべてが
+    優角と判定された）。
+    """
+    from rough2ink.core.panels import count_reflex_vertices
+
+    rectangle = [(0.0, 0.0), (100.0, 0.0), (100.0, 60.0), (0.0, 60.0)]
+
+    assert count_reflex_vertices(rectangle) == 0
+    assert count_reflex_vertices(list(reversed(rectangle))) == 0
+
+
+def test_irregular_flag_is_raised_for_concave_panel() -> None:
+    """絵を枠線と誤認して内側へ食い込んだコマに `irregular` が立つこと。
+
+    実原稿では、枠線検出が破綻して18頂点・優角8個・solidity 0.483 のポリゴンが
+    1つだけ検出される（4コマ相当のページなのに）という壊れ方をしていた。検出コマ数
+    だけを見ていてもこの失敗は数値に現れないため、例外として計上できるようにする。
+    """
+    shape = (400, 400)
+    gray = np.full(shape, 255, dtype=np.uint8)
+    # 大きく凹んだ（食い込んだ）コマ枠を描く。
+    concave = np.array(
+        [[40, 40], [360, 40], [360, 360], [200, 180], [40, 360]], dtype=np.int32
+    )
+    cv2.polylines(gray, [concave], isClosed=True, color=0, thickness=6)
+    panels = detect_panels(gray, PanelParams())
+
+    assert panels, "コマが検出されていない（テストの前提が崩れている）"
+    assert any("irregular" in panel.flags for panel in panels), (
+        f"食い込んだコマに irregular が立つべき, flags={[p.flags for p in panels]}"
+    )
+
+
+def test_irregular_flag_is_not_raised_for_normal_rectangular_panels() -> None:
+    """通常の矩形コマでは `irregular` が立たないこと（誤検出しない）。"""
+    shape = (1414, 1000)
+    gray = np.full(shape, 255, dtype=np.uint8)
+    for top in (60, 740):
+        for left in (60, 530):
+            cv2.rectangle(gray, (left, top), (left + 410, top + 610), 0, 8)
+    panels = detect_panels(gray, PanelParams())
+
+    assert len(panels) == 4, f"4コマ検出される前提, got {len(panels)}"
+    for panel in panels:
+        assert "irregular" not in panel.flags, f"正常な矩形コマに irregular が立った: {panel.flags}"

@@ -68,7 +68,12 @@ class LineParams(BaseModel):
 
 
 class PanelParams(BaseModel):
-    """C. コマ分割用パラメータ。"""
+    """C. コマ分割用パラメータ。
+
+    `min_solidity` は「絵の一部を枠線と誤認して内側へ食い込んだポリゴン」を検出する
+    ための下限（面積 ÷ 凸包面積）。コマ枠は基本的に凸なので、正常なコマはほぼ 1.0 になる。
+    実測では、破綻したポリゴン（18頂点・優角8個）が 0.483、正常な矩形が 1.000 だった。
+    """
 
     close_kernel: int = 9
     min_panel_area_ratio: float = 0.01
@@ -77,6 +82,7 @@ class PanelParams(BaseModel):
     oblique_angle_deg: float = 5.0
     spread_aspect_ratio: float = 1.2
     effect_line_density: float = 0.15
+    min_solidity: float = 0.8
 
 
 class BalloonParams(BaseModel):

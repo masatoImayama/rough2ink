@@ -39,6 +39,8 @@ EXPECTED_DEFAULTS: dict[str, dict[str, float | int]] = {
         "oblique_angle_deg": 5.0,
         "spread_aspect_ratio": 1.2,
         "effect_line_density": 0.15,
+        # 絵を枠線と誤認して内側へ食い込んだポリゴンの検出（凸性の下限）。
+        "min_solidity": 0.8,
     },
     "balloon": {
         "min_area_ratio": 0.002,

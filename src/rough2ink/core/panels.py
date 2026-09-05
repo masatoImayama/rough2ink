@@ -155,6 +155,8 @@ def detect_panels(gray: np.ndarray, params: PanelParams | None = None) -> list[P
             flags.append("overflow")
         if _effect_line_density(ink, panel_mask, area) > params.effect_line_density:
             flags.append("effect_lines")
+        if _is_irregular(polygon, area, params.min_solidity):
+            flags.append("irregular")
 
         panels.append(
             PanelInfo(
@@ -332,6 +334,60 @@ def _touches_edge(polygon: list[tuple[float, float]], w: int, h: int, margin: in
         if x <= margin or x >= (w - 1 - margin) or y <= margin or y >= (h - 1 - margin):
             return True
     return False
+
+
+def count_reflex_vertices(polygon: list[tuple[float, float]]) -> int:
+    """内角が 180° を超える頂点（優角）の数を返す。凹み1箇所につき1つ以上できる。
+
+    多角形の**内角の総和は (n-2)×180° で形状に依存しない**（外角の総和も常に 360°）ため、
+    総和では食い込みを検出できない。判定に使えるのは個々の角であり、ここでは
+    「全体の回り方と逆向きに曲がっている頂点」を数える。
+    """
+    points = np.asarray(polygon, dtype=np.float64)
+    if len(points) < 3:
+        return 0
+
+    # 画像座標系は y 軸が下向きなので、符号付き面積で実際の回り方を求めてから比較する。
+    orientation = np.sign(cv2.contourArea(points.astype(np.float32), oriented=True))
+    if orientation == 0:
+        return 0
+
+    reflex = 0
+    for index in range(len(points)):
+        previous = points[index - 1]
+        current = points[index]
+        following = points[(index + 1) % len(points)]
+        incoming = current - previous
+        outgoing = following - current
+        cross = incoming[0] * outgoing[1] - incoming[1] * outgoing[0]
+        if cross != 0 and np.sign(cross) != orientation:
+            reflex += 1
+    return reflex
+
+
+def polygon_solidity(polygon: list[tuple[float, float]], area: float) -> float:
+    """凸性（面積 ÷ 凸包面積）。矩形なら 1.0、内側へ食い込むほど小さくなる。"""
+    points = np.asarray(polygon, dtype=np.float32)
+    if len(points) < 3:
+        return 0.0
+    hull_area = abs(cv2.contourArea(cv2.convexHull(points)))
+    if hull_area <= 0:
+        return 0.0
+    return float(area / hull_area)
+
+
+def _is_irregular(polygon: list[tuple[float, float]], area: float, min_solidity: float) -> bool:
+    """絵の一部を枠線と誤認して内側へ食い込んだポリゴンかを判定する。
+
+    コマ枠は基本的に凸なので、凹んでいること自体が枠線検出の破綻を示す。実測では、
+    破綻したポリゴン（18頂点）が solidity 0.483 / 優角8個、正常な矩形が 1.000 / 0個で、
+    2倍以上離れていた。
+
+    **このフラグは破綻を直すものではなく、可視化するもの。** 検出コマ数だけを見ていると
+    「絵を巻き込んで1つの巨大なコマになった」失敗が数値に現れないため、
+    例外発生率として計上できるようにする（#17 と同じ論点）。
+    """
+    return polygon_solidity(polygon, area) < min_solidity or count_reflex_vertices(polygon) > 0
 
 
 def _has_oblique_edge(polygon: list[tuple[float, float]], threshold_deg: float) -> bool:
