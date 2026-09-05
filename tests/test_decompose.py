@@ -165,6 +165,47 @@ def test_black_rectangle_is_classified_as_fill() -> None:
     assert result["line"][inner_rect].max() == 0
 
 
+def test_thin_lines_touching_a_solid_area_stay_line() -> None:
+    """実原稿で報告された「線がほぼベタ判定される」問題の回帰テスト。
+
+    以前の実装は「収縮後も残る画素を含む**連結成分まるごと**」をベタにしていた。実原稿では
+    ペン入れ・コマ枠・ベタが1つの巨大な連結成分に繋がる（実測: B4原稿1枚で最大成分が
+    ページ全体を覆う 5,132,079px）ため、ベタが1箇所あるだけでそこに繋がる線が全て
+    ベタへ流れ込み、線の被覆率が 1.8% まで落ちていた。
+
+    ここではベタ矩形に細線を**接続した**状態を作り、細線が線のまま残ることを確認する。
+    線がベタから独立していると、連結成分を辿る旧実装でも通ってしまうため、
+    「接続している」ことがこのテストの要点。
+    """
+    shape = (300, 300)
+    gray = np.full(shape, 255, dtype=np.uint8)
+    # ベタ（十分に太い塊）
+    gray[40:120, 40:200] = 0
+    # そのベタから伸びる細線（太さ 2px）。旧実装ではこの線もベタ扱いになっていた。
+    gray[160, 40:260] = 0
+    gray[161, 40:260] = 0
+    gray[120:200, 100] = 0  # ベタと細線を縦に繋ぐ（同一連結成分にする）
+    gray[120:200, 101] = 0
+
+    params = AnalysisParams()
+    result = decompose(gray, params)
+
+    # 前提: 意図どおり1つの連結成分になっていること（そうでないとこのテストは無意味）。
+    dark = (gray <= params.fill.black_threshold).astype(np.uint8)
+    num_labels, _ = cv2.connectedComponents(dark, connectivity=8)
+    assert num_labels == 2, "ベタと細線が1つの連結成分になっている前提が崩れている"
+
+    # ベタ矩形の芯はベタ。
+    assert result["fill"][60:100, 60:180].mean() / 255.0 > 0.95
+
+    # ベタに接続していても、細線は線のまま残る。
+    horizontal_line = result["line"][160:162, 210:260]
+    assert horizontal_line.mean() / 255.0 > 0.95, (
+        "ベタに接続した細線がベタへ流れ込んでいる（連結成分まるごとの判定に戻っていないか）"
+    )
+    assert result["fill"][160:162, 210:260].max() == 0
+
+
 def test_thin_line_is_classified_as_line() -> None:
     shape = (200, 200)
     gray = _make_thin_line(shape, row=100, thickness=2)
@@ -193,6 +234,64 @@ def test_concentric_curve_strokes_are_not_classified_as_tone() -> None:
     assert tone_ratio < 0.05, (
         f"curved strokes must not be misclassified as tone, got tone_ratio={tone_ratio}"
     )
+
+
+def test_uniform_solid_area_is_not_classified_as_tone() -> None:
+    """一様な黒面（ベタ）がトーン判定されないこと。
+
+    尖鋭度（帯域内の最大ビン / 中央値）だけを見ていた頃は、一様面でスペクトルが退化して
+    この比が無意味な値を取り、**純粋なベタ矩形の内側の 96% がトーン判定されていた**。
+    ベタ優先の排他化に隠れて表面化していなかったが、トーンを先に差し引く設計にすると
+    ベタの取りこぼしとして現れる。ブロック内の標準偏差の下限で落とす。
+    """
+    from rough2ink.core.decompose import _detect_tone
+
+    gray = np.full((300, 300), 255, dtype=np.uint8)
+    gray[40:200, 40:260] = 0
+    params = AnalysisParams()
+
+    tone = _detect_tone(gray, params.tone)
+
+    # ベタの内側（エッジから十分離れた領域）はトーンにならない。
+    interior_ratio = float(tone[80:160, 80:220].mean())
+    assert interior_ratio < 0.05, f"uniform solid area must not be tone, got {interior_ratio}"
+
+
+def test_straight_edge_is_not_classified_as_tone() -> None:
+    """まっすぐで鋭いエッジがトーン判定されないこと。
+
+    直線エッジは2次元周波数空間で原点を通る**1本の直線上**にエネルギーが集中するため、
+    帯域内の大半のビンがほぼ 0 になり、「最大 / 中央値」が網点と同程度に跳ね上がる。
+    網点は2次元格子なので基本ベクトル2本ぶんの**独立した2方向**にピークを持つ点で
+    区別できる（`min_direction_ratio`）。
+    """
+    from rough2ink.core.decompose import _detect_tone
+
+    gray = np.full((256, 256), 255, dtype=np.uint8)
+    gray[:, 128:] = 0  # 縦一直線のエッジ
+    params = AnalysisParams()
+
+    tone = _detect_tone(gray, params.tone)
+
+    edge_ratio = float(tone[64:192, 96:160].mean())
+    assert edge_ratio < 0.05, f"straight edge must not be tone, got {edge_ratio}"
+
+
+def test_parallel_lines_are_not_classified_as_tone() -> None:
+    """等間隔の平行線（1方向のみの周期構造）がトーン判定されないこと。
+
+    完全に等間隔なので尖鋭度は高いが、方向が1つしかないため網点の格子とは区別できる。
+    """
+    from rough2ink.core.decompose import _detect_tone
+
+    gray = np.full((256, 256), 255, dtype=np.uint8)
+    gray[::6, :] = 0
+    params = AnalysisParams()
+
+    tone = _detect_tone(gray, params.tone)
+
+    ratio = float(tone[64:192, 64:192].mean())
+    assert ratio < 0.05, f"parallel lines must not be tone, got {ratio}"
 
 
 def test_cross_hatching_is_not_classified_as_tone() -> None:

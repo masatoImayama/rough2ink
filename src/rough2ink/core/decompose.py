@@ -46,6 +46,13 @@ _MASK_OFF = np.uint8(0)
 # 小さすぎるとPythonループのオーバーヘッドが増える。
 _TONE_ROW_CHUNK_BUDGET_BYTES = 64 * 1024 * 1024
 
+# 帯域内エネルギーを方向別に集計するときの角度ビン数（0〜π を等分する）。
+_DIRECTION_BINS = 12
+# 「独立した方向」と認めるための角度ビンの最小距離。12ビン（15°刻み）で 2 なら 30° 以上。
+# 網点格子の基本ベクトル2本は通常これより大きく離れる一方、直線エッジのわずかな
+# 角度のブレは同じ方向として扱われる。
+_DIRECTION_MIN_SEPARATION_BINS = 2
+
 # トーンマスクの整形（ブロック格子状の輪郭を滑らかにする）に使う構造要素の大きさ。
 _TONE_MORPH_KERNEL_SIZE = 5
 
@@ -85,25 +92,49 @@ def _to_mask(boolean: np.ndarray) -> np.ndarray:
 
 
 def _detect_fill(gray: np.ndarray, params: FillParams) -> np.ndarray:
-    """面積閾値以上、かつ収縮後も残る連結黒領域を「ベタ」として検出する。"""
-    dark = (gray <= params.black_threshold).astype(np.uint8)
+    """面積閾値以上の「太い黒の塊」を「ベタ」として検出する。
 
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
-    if num_labels <= 1:
+    判定は**画素の局所的な太さ**で行う。距離変換で各黒画素から白までの距離を測り、
+    半径 `erosion_radius` の円が内側に収まる画素（＝塊の芯）を種にして、同じ半径で
+    膨張し直した領域をベタとする（モルフォロジーのオープニングと等価）。
+
+    以前は「収縮後も残る画素を含む**連結成分まるごと**」をベタにしていたが、実原稿では
+    ペン入れ・コマ枠・ベタ・網点がすべて1つの巨大な連結成分に繋がるため（実測: B4原稿1枚で
+    最大成分がページ全体を覆う 5,132,079px）、芯が1箇所でもあればページの大半がベタに
+    流れ込んでいた。連結成分の同一性ではなく局所的な太さで判定することでこれを断つ。
+
+    優先順位（ベタ > トーン > 線）は呼び出し側の排他化で保つため、ここではトーンを
+    考慮しない。二値原稿では高濃度の網点が繋がって太い塊になりベタへ流れ込みうるが、
+    トーン検出を信頼して差し引くとトーン側の誤検出がそのままベタの取りこぼしになるため、
+    依存させない。
+    """
+    dark = gray <= params.black_threshold
+    if not dark.any():
         return np.zeros(gray.shape, dtype=bool)
 
     radius = max(1, params.erosion_radius)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
-    eroded = cv2.erode(dark * 255, kernel) > 0
 
-    # 収縮後も残る画素が属するラベルIDだけを残す（細線は収縮で消えるため自然に除外される）。
-    surviving_ids = set(np.unique(labels[eroded]).tolist()) - {0}
+    # 各黒画素が白まで何 px 離れているか＝その位置に収まる円の半径。
+    distance = cv2.distanceTransform(dark.astype(np.uint8), cv2.DIST_L2, 5)
+    core = distance >= radius
+    if not core.any():
+        return np.zeros(gray.shape, dtype=bool)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    grown = cv2.dilate(core.astype(np.uint8) * 255, kernel) > 0
+    grown &= dark  # 膨張が黒画素の外へはみ出さないように戻す
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        grown.astype(np.uint8), connectivity=8
+    )
+    if num_labels <= 1:
+        return np.zeros(gray.shape, dtype=bool)
 
     min_area = params.min_area_ratio * gray.size
     fill_ids = [
         label_id
         for label_id in range(1, num_labels)
-        if stats[label_id, cv2.CC_STAT_AREA] >= min_area and label_id in surviving_ids
+        if stats[label_id, cv2.CC_STAT_AREA] >= min_area
     ]
     if not fill_ids:
         return np.zeros(gray.shape, dtype=bool)
@@ -128,6 +159,7 @@ def _detect_tone(gray: np.ndarray, params: ToneParams) -> np.ndarray:
 
     win2d = np.outer(np.hanning(window), np.hanning(window)).astype(np.float32)
     band_mask, total_mask = _band_masks(window, params.bandpass_low, params.bandpass_high)
+    direction_onehot, direction_independent = _direction_bins(window, band_mask)
 
     gray_f = gray.astype(np.float32)
     # ウィンドウ抽出はビュー（コピーなし）。実データのコピーはチャンク単位に限定して
@@ -169,8 +201,34 @@ def _detect_tone(gray: np.ndarray, params: ToneParams) -> np.ndarray:
             where=median_band > 0,
         )
 
+        # 一様な面（ベタの内側・白紙）はスペクトルが退化して尖鋭度が無意味な値を取るため、
+        # ブロック内の画素値のばらつきで落とす。実測でこの guard が無いと、純粋なベタ矩形の
+        # 96% がトーン判定されていた。
+        block_std = blocks.std(axis=(-2, -1))
+
+        # 方向の独立性: 網点は2次元格子なので基本ベクトル2本ぶんの方向にエネルギーを持つ。
+        # 一方、直線エッジ・平行線は原点を通る1本の直線上にしか energy を持たないため、
+        # 「最大方向」と「そこから十分離れた方向」の比が小さくなる。
+        direction_energy = band_values @ direction_onehot  # (nrows, ncols, _DIRECTION_BINS)
+        primary_index = np.argmax(direction_energy, axis=-1)
+        primary_energy = np.take_along_axis(
+            direction_energy, primary_index[..., None], axis=-1
+        ).squeeze(-1)
+        # 最大方向から十分離れた方向だけを候補にして、その中の最大を second とする。
+        allowed = direction_independent[primary_index]  # (nrows, ncols, _DIRECTION_BINS)
+        secondary_energy = np.where(allowed, direction_energy, 0.0).max(axis=-1)
+        direction_ratio = np.divide(
+            secondary_energy,
+            primary_energy,
+            out=np.zeros_like(secondary_energy),
+            where=primary_energy > 0,
+        )
+
         is_tone = (
-            (ratio >= params.energy_threshold) & (sharpness >= params.sharpness_threshold)
+            (ratio >= params.energy_threshold)
+            & (sharpness >= params.sharpness_threshold)
+            & (block_std >= params.min_block_std)
+            & (direction_ratio >= params.min_direction_ratio)
         ).astype(np.float32)
 
         for row_index, top in enumerate(chunk_rows):
@@ -200,6 +258,36 @@ def _band_masks(window: int, low: float, high: float) -> tuple[np.ndarray, np.nd
     band_mask = (radius >= low) & (radius <= high)
     total_mask = radius > 0.0  # DC成分（ブロック内の平均輝度）は正規化対象から除く
     return band_mask, total_mask
+
+
+def _direction_bins(window: int, band_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """帯域内の各ビンを角度ビンに割り当てる行列と、角度ビン同士の「独立」判定表を返す。
+
+    パワースペクトルは原点対称なので、角度は 0〜π の範囲だけ見れば足りる
+    （`angle` と `angle + π` は同じ方向を指す）。
+
+    Returns:
+        (onehot, independent):
+            onehot: (帯域ビン数, 角度ビン数) の 0/1 行列。`band_values @ onehot` で
+                角度ごとのエネルギーが得られる。
+            independent[i, j]: 角度ビン i と j が十分に離れているか（円環距離で判定）。
+                同じ方向のわずかなブレを「別方向」と数えないためのもの。
+    """
+    freqs = np.fft.fftfreq(window)
+    fx, fy = np.meshgrid(freqs, freqs)
+    angles = np.mod(np.arctan2(fy, fx), np.pi)  # 0〜π
+
+    bin_index = np.minimum(
+        (angles[band_mask] / np.pi * _DIRECTION_BINS).astype(np.int32), _DIRECTION_BINS - 1
+    )
+    onehot = np.zeros((bin_index.size, _DIRECTION_BINS), dtype=np.float32)
+    onehot[np.arange(bin_index.size), bin_index] = 1.0
+
+    indices = np.arange(_DIRECTION_BINS)
+    circular_distance = np.abs(indices[:, None] - indices[None, :])
+    circular_distance = np.minimum(circular_distance, _DIRECTION_BINS - circular_distance)
+    independent = circular_distance >= _DIRECTION_MIN_SEPARATION_BINS
+    return onehot, independent
 
 
 def _block_starts(total: int, window: int, stride: int) -> list[int]:
