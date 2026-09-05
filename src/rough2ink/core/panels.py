@@ -168,11 +168,44 @@ def detect_panels(gray: np.ndarray, params: PanelParams | None = None) -> list[P
             )
         )
 
+    # 信用できるコマ（`irregular` でない）が1つも無ければ、枠線検出そのものが
+    # 成立していない。全面断ち切りページ（内部に枠線が無い）ではこれが正常な状態で、
+    # 正しい答えは「ページ全体が1コマ」である。
+    if params.fallback_to_page and not any("irregular" not in p.flags for p in panels):
+        panels = [_page_as_panel(h, w, page_area, is_spread)]
+
     panels.sort(key=lambda p: (p.bbox[1], p.bbox[0]) if p.bbox is not None else (0, 0))
     for idx, panel in enumerate(panels):
         panel.panel_id = f"panel_{idx:03d}"
 
     return panels
+
+
+def _page_as_panel(h: int, w: int, page_area: float, is_spread: bool) -> PanelInfo:
+    """ページ全体を1コマとして返す（枠線が検出できなかった場合のフォールバック）。
+
+    実測での失敗例: 全面断ち切りの1コマページに対し、絵の輪郭を枠線と誤認して
+    18頂点・solidity 0.483 のジグザグが1個だけ返っていた。正しい答えは
+    「ページ全体が1コマ」であり、その場合フォールバックが正解そのものになる。
+
+    枠線候補の最小長を上げて誤検出を減らす案は実測で否定された。コマ枠はページ短辺の
+    半分より短いことが多く（実測: 4093x5787 のページで比率 0.5 にすると 6コマすべてが
+    消えた）、閾値では「枠線が無いページ」と「枠線が短いページ」を分けられない。
+
+    `no_frame` フラグを立てて、これが検出結果ではなくフォールバックであることを
+    例外発生率に計上できるようにする。
+    """
+    flags: list[PanelFlag] = ["no_frame"]
+    if is_spread:
+        flags.append("spread")
+    polygon = [(0.0, 0.0), (float(w), 0.0), (float(w), float(h)), (0.0, float(h))]
+    return PanelInfo(
+        panel_id="",
+        polygon=polygon,
+        bbox=(0, 0, w, h),
+        area_ratio=(h * w) / page_area,
+        flags=flags,
+    )
 
 
 def polygon_mask(shape: tuple[int, int], polygon: Sequence[tuple[float, float]]) -> np.ndarray:

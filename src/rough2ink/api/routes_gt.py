@@ -12,11 +12,13 @@ import json
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+import numpy as np
+from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import FileResponse
+from psd_tools import PSDImage
 from pydantic import BaseModel
 
-from rough2ink.core import gt
+from rough2ink.core import gt, imageio
 from rough2ink.core.config import resolve_page_dir
 from rough2ink.core.gt_suggest import RoleSuggestion, suggest_roles
 from rough2ink.core.layer_stats import (
@@ -25,6 +27,7 @@ from rough2ink.core.layer_stats import (
     load_cached_stats,
     thumbnail_path,
 )
+from rough2ink.core.params import PreviewParams
 from rough2ink.core.types import LayerInfo, LayerRole
 
 router = APIRouter(prefix="/api", tags=["gt"])
@@ -127,6 +130,37 @@ def get_layer_stats(page_id: str, refresh: bool = False) -> list[LayerStat]:
         source_path,
         (meta["width"], meta["height"]),
     )
+
+
+@router.get("/pages/{page_id}/layers/{layer_id}/mask")
+def get_layer_mask(page_id: str, layer_id: str) -> Response:
+    """レイヤー1枚の墨の位置を、プレビュー解像度のマスク PNG で返す。
+
+    サムネイルはレイヤーの bbox しか映さないため「ページのどこを指しているか」が
+    分からない。役割を割り当てるとき、そのレイヤーがページ上のどこを占めるかを
+    オーバーレイで重ねて確認できるようにする。
+
+    GT マスク生成（`core.gt.build_gt_masks`）と**同じ墨の判定**を使う。ここで見えている
+    ものがそのまま GT に入る、という対応を崩さないため。
+    """
+    _validate_page_id(page_id)
+    if not _LAYER_ID_RE.fullmatch(layer_id):
+        raise HTTPException(status_code=404, detail=f"layer not found: {layer_id!r}")
+
+    meta = _load_page_meta(page_id)
+    source_path = Path(meta.get("source_path", ""))
+    if not source_path.is_file():
+        raise HTTPException(status_code=400, detail=f"source PSD not found for page {page_id!r}")
+
+    canvas = np.zeros((meta["height"], meta["width"]), dtype=bool)
+    psd = PSDImage.open(str(source_path))
+    gt._paint_opaque_pixels(psd, layer_id, canvas, ink_threshold=gt._DEFAULT_INK_THRESHOLD)
+    if not canvas.any():
+        raise HTTPException(status_code=404, detail=f"layer has no ink: {layer_id!r}")
+
+    mask = np.where(canvas, np.uint8(255), np.uint8(0))
+    mask = imageio.make_preview(mask, PreviewParams().max_long_side)
+    return Response(content=imageio.encode_png_bytes(mask), media_type="image/png")
 
 
 @router.get("/pages/{page_id}/layers/{layer_id}/thumbnail")

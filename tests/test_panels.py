@@ -325,8 +325,8 @@ def test_reflex_count_is_orientation_independent() -> None:
 def test_irregular_flag_is_raised_for_concave_panel() -> None:
     """絵を枠線と誤認して内側へ食い込んだコマに `irregular` が立つこと。
 
-    実原稿では、枠線検出が破綻して18頂点・優角8個・solidity 0.483 のポリゴンが
-    1つだけ検出される（4コマ相当のページなのに）という壊れ方をしていた。検出コマ数
+    実原稿（全面断ち切りの1コマページ）では、枠線検出が破綻して18頂点・優角8個・
+    solidity 0.483 のジグザグが1つだけ検出されるという壊れ方をしていた。検出コマ数
     だけを見ていてもこの失敗は数値に現れないため、例外として計上できるようにする。
     """
     shape = (400, 400)
@@ -336,7 +336,9 @@ def test_irregular_flag_is_raised_for_concave_panel() -> None:
         [[40, 40], [360, 40], [360, 360], [200, 180], [40, 360]], dtype=np.int32
     )
     cv2.polylines(gray, [concave], isClosed=True, color=0, thickness=6)
-    panels = detect_panels(gray, PanelParams())
+    # フォールバックを切って `irregular` 単体の挙動を見る（有効なままだと、信用できる
+    # コマが0個になった時点でページ全体1コマに差し替えられてしまう）。
+    panels = detect_panels(gray, PanelParams(fallback_to_page=False))
 
     assert panels, "コマが検出されていない（テストの前提が崩れている）"
     assert any("irregular" in panel.flags for panel in panels), (
@@ -356,3 +358,56 @@ def test_irregular_flag_is_not_raised_for_normal_rectangular_panels() -> None:
     assert len(panels) == 4, f"4コマ検出される前提, got {len(panels)}"
     for panel in panels:
         assert "irregular" not in panel.flags, f"正常な矩形コマに irregular が立った: {panel.flags}"
+
+
+def test_page_without_panel_borders_falls_back_to_a_single_page_panel() -> None:
+    """枠線が無いページ（全面断ち切り）ではページ全体を1コマとして返すこと。
+
+    実原稿の全面断ち切りページで、絵の輪郭を枠線と誤認して18頂点・solidity 0.483 の
+    ジグザグが1個だけ返っていた。正しい答えは「ページ全体が1コマ」なので、信用できる
+    コマ（`irregular` でない）が1つも無いときはページ全体に差し替える。
+
+    枠線候補の最小長を上げて誤検出を減らす案は実測で否定した。コマ枠はページ短辺の
+    半分より短いことが多く、実測では比率 0.5 で正常な6コマページのコマが全て消えた。
+    """
+    shape = (600, 420)
+    rng = np.random.default_rng(3)
+    # 枠線が一切無く、絵だけがあるページを模す（曲線ストロークを散らす）。
+    gray = np.full(shape, 255, dtype=np.uint8)
+    for _ in range(60):
+        center = (int(rng.integers(0, shape[1])), int(rng.integers(0, shape[0])))
+        axes = (int(rng.integers(20, 120)), int(rng.integers(20, 120)))
+        angle = float(rng.integers(0, 180))
+        cv2.ellipse(gray, center, axes, angle, 0, 360, 0, 3)
+
+    panels = detect_panels(gray, PanelParams())
+
+    assert len(panels) == 1, f"ページ全体1コマになるべき, got {len(panels)}"
+    panel = panels[0]
+    assert "no_frame" in panel.flags, f"フォールバックであることを示すべき, {panel.flags}"
+    assert panel.area_ratio == 1.0
+    assert panel.bbox == (0, 0, shape[1], shape[0])
+
+
+def test_fallback_does_not_replace_pages_with_valid_panels() -> None:
+    """信用できるコマが取れているページはフォールバックしないこと。"""
+    shape = (1414, 1000)
+    gray = np.full(shape, 255, dtype=np.uint8)
+    for top in (60, 740):
+        for left in (60, 530):
+            cv2.rectangle(gray, (left, top), (left + 410, top + 610), 0, 8)
+
+    panels = detect_panels(gray, PanelParams())
+
+    assert len(panels) == 4
+    assert all("no_frame" not in panel.flags for panel in panels)
+
+
+def test_fallback_can_be_disabled() -> None:
+    """`fallback_to_page=False` なら従来どおり検出結果をそのまま返すこと。"""
+    shape = (600, 420)
+    gray = np.full(shape, 255, dtype=np.uint8)
+
+    panels = detect_panels(gray, PanelParams(fallback_to_page=False))
+
+    assert all("no_frame" not in panel.flags for panel in panels)

@@ -73,6 +73,11 @@ export async function getRoleSuggestions(pageId) {
   return res.json();
 }
 
+/** レイヤー1枚の墨をプレビュー解像度で返すマスク URL（ページ上の位置確認用）。 */
+export function layerMaskUrl(pageId, layerId) {
+  return `${BASE}/pages/${encodeURIComponent(pageId)}/layers/${encodeURIComponent(layerId)}/mask`;
+}
+
 /** レイヤーのサムネイル画像 URL（`layers/stats` の算出時に生成される）。 */
 export function layerThumbnailUrl(pageId, layerId) {
   return `${BASE}/pages/${encodeURIComponent(pageId)}/layers/${encodeURIComponent(layerId)}/thumbnail`;

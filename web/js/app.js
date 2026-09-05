@@ -243,7 +243,13 @@ async function selectPage(pageId) {
   // 未処理の Promise 拒否になり画面に何も出ない（呼び出し元のクリックハンドラは await しない）。
   try {
     const layers = await api.getLayers(pageId);
-    await renderLayerMapping(byId("layer-mapping"), pageId, layers, byId("gt-status"));
+    await renderLayerMapping(
+      byId("layer-mapping"),
+      pageId,
+      layers,
+      byId("gt-status"),
+      (layerId) => overlay.setHighlightLayer(layerId ? api.layerMaskUrl(pageId, layerId) : null),
+    );
 
     await overlay.loadBase(api.previewUrl(pageId));
     overlay.redraw();

@@ -139,3 +139,80 @@ def test_no_node_dependency_or_cdn_reference_anywhere_in_web_dir() -> None:
 
     assert not (WEB_DIR.parent / "package.json").exists()
     assert not (WEB_DIR / "package.json").exists()
+
+
+def _parse_param_schema_keys() -> set[str]:
+    """`web/js/params.js` の PARAM_SCHEMA から `group.key` の集合を取り出す。
+
+    JS 実行系が無い（非機能要件）ため、`group:` と `key:` の出現順から素朴に組み立てる。
+    """
+    import re
+
+    source = (WEB_DIR / "js" / "params.js").read_text(encoding="utf-8")
+    schema_start = source.index("export const PARAM_SCHEMA")
+    schema_end = source.index("/** 汎用デバウンス。")
+    schema = source[schema_start:schema_end]
+
+    keys: set[str] = set()
+    current_group: str | None = None
+    for match in re.finditer(r'(group|key):\s*"([^"]+)"', schema):
+        kind, name = match.group(1), match.group(2)
+        if kind == "group":
+            current_group = name
+        elif current_group is not None:
+            keys.add(f"{current_group}.{name}")
+    return keys
+
+
+def test_param_schema_covers_every_tunable_backend_parameter() -> None:
+    """UI のスライダーがサーバの `AnalysisParams` を取りこぼしていないこと。
+
+    パラメータを増やしたときに UI 側の追加を忘れると、その値は既定値のまま固定され、
+    調整できないことにも気づけない（実際に tone の3項目・panel の2項目・balloon の
+    2項目が UI に無い状態になっていた）。
+    """
+    from rough2ink.core.params import AnalysisParams
+
+    schema_keys = _parse_param_schema_keys()
+    backend_keys = set()
+    for group_name, group_model in AnalysisParams().model_dump().items():
+        if group_name == "preview":
+            # プレビュー倍率は解析経路から参照しない（Review #24）。UI にも出さない。
+            continue
+        for field_name in group_model:
+            backend_keys.add(f"{group_name}.{field_name}")
+
+    missing = backend_keys - schema_keys
+    assert not missing, f"UI に出ていないパラメータがある: {sorted(missing)}"
+
+    unknown = schema_keys - backend_keys
+    assert not unknown, f"サーバに存在しないパラメータが UI にある: {sorted(unknown)}"
+
+
+def test_every_parameter_has_a_hint() -> None:
+    """すべてのパラメータに説明文（ホバーで出るヒント）が付いていること。"""
+    import re
+
+    source = (WEB_DIR / "js" / "params.js").read_text(encoding="utf-8")
+    schema_start = source.index("export const PARAM_SCHEMA")
+    schema_end = source.index("/** 汎用デバウンス。")
+    schema = source[schema_start:schema_end]
+
+    key_count = len(re.findall(r'\bkey:\s*"', schema))
+    hint_count = len(re.findall(r"\bhint:\s*", schema))
+    assert key_count > 0
+    assert hint_count == key_count, f"ヒントの無いパラメータがある（key={key_count} hint={hint_count}）"
+
+
+def test_hint_tooltip_is_rendered_outside_the_scrolling_sidebar() -> None:
+    """ヒントの吹き出しがサイドバーの外（body直下・固定配置）に出ること。
+
+    サイドバーは `overflow-y: auto` なので、中に絶対配置すると枠で切られて読めない。
+    """
+    source = (WEB_DIR / "js" / "params.js").read_text(encoding="utf-8")
+    assert "document.body.appendChild" in source
+
+    css = (WEB_DIR / "css" / "style.css").read_text(encoding="utf-8")
+    rule_start = css.index(".param-tooltip {")
+    rule = css[rule_start : css.index("}", rule_start)]
+    assert "position: fixed" in rule

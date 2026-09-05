@@ -41,6 +41,7 @@ EXPECTED_DEFAULTS: dict[str, dict[str, float | int]] = {
         "effect_line_density": 0.15,
         # 絵を枠線と誤認して内側へ食い込んだポリゴンの検出（凸性の下限）。
         "min_solidity": 0.8,
+        "fallback_to_page": True,
     },
     "balloon": {
         "min_area_ratio": 0.002,

@@ -30,7 +30,7 @@ function percent(value) {
  *
  * @returns 保存対象として編集中のマッピングオブジェクト（`{layer_id: role}`）。
  */
-export async function renderLayerMapping(container, pageId, layers, statusEl) {
+export async function renderLayerMapping(container, pageId, layers, statusEl, onHighlight) {
   container.innerHTML = "";
   if (statusEl) statusEl.textContent = "";
 
@@ -107,7 +107,25 @@ export async function renderLayerMapping(container, pageId, layers, statusEl) {
     }
 
     const nameTd = document.createElement("td");
-    nameTd.textContent = layer.path;
+    // 行をクリックするとページ上での位置をオーバーレイで強調する。サムネイルは
+    // レイヤーの bbox しか映さないため、どこを指しているかは実寸で見ないと分からない。
+    if (onHighlight && stat?.has_pixels) {
+      const highlightButton = document.createElement("button");
+      highlightButton.type = "button";
+      highlightButton.className = "layer-locate";
+      highlightButton.textContent = layer.path;
+      highlightButton.title = "ページ上の位置を強調表示（もう一度押すと解除）";
+      highlightButton.addEventListener("click", () => {
+        const active = highlightButton.classList.toggle("layer-locate--active");
+        for (const other of tbody.querySelectorAll(".layer-locate--active")) {
+          if (other !== highlightButton) other.classList.remove("layer-locate--active");
+        }
+        onHighlight(active ? layer.id : null);
+      });
+      nameTd.appendChild(highlightButton);
+    } else {
+      nameTd.textContent = layer.path;
+    }
     const suggestion = suggestionById.get(layer.id);
     if (suggestion?.matched_keyword) {
       const badge = document.createElement("span");
