@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import gc
+
 import io
 
 import numpy as np
@@ -171,18 +173,29 @@ def test_jpeg_block_score_memory_stays_bounded_for_large_image() -> None:
     修正前は float64 昇格 + 境界/非境界の連結コピーにより、レビュー時点の実測で
     入力の約33倍（増分1164MB）まで膨らんでいた。int16 での差分計算とチャンク処理により、
     これを大きく下回ることを確認する。
-    """
-    resource = pytest.importorskip("resource", reason="peak RSS 計測は POSIX の resource モジュールに依存する")
 
+    RSS の取得に `psutil` を使う。以前は `resource`（POSIX 専用）を使っていたため
+    **Windows では常にスキップされ**、「Windows ローカルで動くこと」という第一要件
+    （Epic 仕様書 10 節）に対する検証がまったく効いていなかった。`tracemalloc` は
+    Python のアロケータ経由の確保しか追跡できず、NumPy の大きな配列は malloc を
+    直接呼ぶため捕捉できない（このテストが測りたいのはまさにそれ）ので使えない。
+    """
+    import psutil
+
+    process = psutil.Process()
     rng = np.random.default_rng(11)
     gray = rng.integers(0, 256, size=(5000, 7000), dtype=np.uint8)
     input_bytes = gray.nbytes
 
-    before_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    score = _compute_jpeg_block_score(gray)
-    after_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # 計測前にウォームアップして、初回呼び出し時のライブラリ内部の確保を増分から除く。
+    _compute_jpeg_block_score(gray[:64, :64])
+    gc.collect()
 
-    increment_bytes = max(0, (after_kb - before_kb) * 1024)
+    before_bytes = process.memory_info().rss
+    score = _compute_jpeg_block_score(gray)
+    after_bytes = process.memory_info().rss
+
+    increment_bytes = max(0, after_bytes - before_bytes)
 
     assert isinstance(score, float)
     # 修正前の実測（増分1164MB、入力の約33倍）を大きく下回ることを確認する。
