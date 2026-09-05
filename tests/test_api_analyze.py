@@ -221,7 +221,13 @@ def test_analyze_reflects_changed_params(tmp_path: Path, monkeypatch) -> None:
     strict_params.panel.min_panel_area_ratio = 0.5
     strict_response = _analyze(client, page_id, strict_params)
     assert strict_response.status_code == 200
-    assert strict_response.json()["panels"] == []
+
+    # 信用できるコマが1つも残らないので、ページ全体1コマへフォールバックする
+    # （枠線が無いページと同じ扱い）。空リストではなく `no_frame` 付きの1コマになる。
+    strict_panels = strict_response.json()["panels"]
+    assert len(strict_panels) == 1
+    assert strict_panels[0]["flags"] == ["no_frame"]
+    assert strict_panels[0]["area_ratio"] == 1.0
 
 
 def test_analyze_persists_full_resolution_masks_to_workspace(

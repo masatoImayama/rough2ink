@@ -83,6 +83,9 @@ class PanelParams(BaseModel):
     spread_aspect_ratio: float = 1.2
     effect_line_density: float = 0.15
     min_solidity: float = 0.8
+    # 信用できるコマが1つも取れなかったとき、ページ全体を1コマとして返すか。
+    # 全面断ち切りページ（内部に枠線が無い）では、これが正しい答えになる。
+    fallback_to_page: bool = True
 
 
 class BalloonParams(BaseModel):
