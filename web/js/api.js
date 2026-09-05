@@ -57,6 +57,45 @@ export async function getGTMapping(pageId) {
   return res.json();
 }
 
+/** `GET /api/pages/{page_id}/layers/stats`。レイヤーごとの墨の被覆率等。初回は算出に数十秒かかる。 */
+export async function getLayerStats(pageId) {
+  const res = await handleResponse(
+    await fetch(`${BASE}/pages/${encodeURIComponent(pageId)}/layers/stats`)
+  );
+  return res.json();
+}
+
+/** `GET /api/pages/{page_id}/gt/suggest`。レイヤー名からの役割推定（初期値であり正解ではない）。 */
+export async function getRoleSuggestions(pageId) {
+  const res = await handleResponse(
+    await fetch(`${BASE}/pages/${encodeURIComponent(pageId)}/gt/suggest`)
+  );
+  return res.json();
+}
+
+/** レイヤーのサムネイル画像 URL（`layers/stats` の算出時に生成される）。 */
+export function layerThumbnailUrl(pageId, layerId) {
+  return `${BASE}/pages/${encodeURIComponent(pageId)}/layers/${encodeURIComponent(layerId)}/thumbnail`;
+}
+
+/** `POST /api/pages/{page_id}/autofit`。GT に対するパラメータ探索を開始する。 */
+export async function startAutofit(pageId, params) {
+  const res = await handleResponse(
+    await fetch(`${BASE}/pages/${encodeURIComponent(pageId)}/autofit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params }),
+    })
+  );
+  return res.json();
+}
+
+/** `GET /api/autofit/{job_id}`。探索ジョブの進捗・結果。 */
+export async function getAutofitStatus(jobId) {
+  const res = await handleResponse(await fetch(`${BASE}/autofit/${encodeURIComponent(jobId)}`));
+  return res.json();
+}
+
 /** `PUT /api/pages/{page_id}/gt`。GT 役割マッピング `{layer_path: role}` を保存する。 */
 export async function putGTMapping(pageId, mapping) {
   const res = await handleResponse(

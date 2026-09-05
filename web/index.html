@@ -39,6 +39,11 @@
 
       <section id="param-section">
         <h2>5. パラメータ</h2>
+        <div id="autofit-controls">
+          <button type="button" id="autofit-run">GT に合わせて自動調整</button>
+          <p id="autofit-status" class="status"></p>
+          <div id="autofit-result"></div>
+        </div>
         <div id="param-controls"></div>
       </section>
     </aside>
@@ -74,6 +79,18 @@
             フキダシ
             <input id="layer-balloon-opacity" type="range" min="0" max="1" step="0.05" value="0.4" />
           </label>
+        </div>
+
+        <div id="zoom-controls">
+          <span>ズーム</span>
+          <button type="button" class="zoom-step" id="zoom-out" title="縮小">−</button>
+          <input id="zoom-range" type="range" min="10" max="400" step="5" value="100"
+                 aria-label="ズーム倍率" />
+          <button type="button" class="zoom-step" id="zoom-in" title="拡大">＋</button>
+          <span id="zoom-value">100%</span>
+          <button type="button" id="zoom-fit">幅に合わせる</button>
+          <button type="button" id="zoom-reset">等倍</button>
+          <span class="hint">Ctrl+ホイールでも拡大縮小できます</span>
         </div>
 
         <div id="canvas-wrap">

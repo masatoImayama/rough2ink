@@ -17,11 +17,16 @@ EXPECTED_DEFAULTS: dict[str, dict[str, float | int]] = {
         "bandpass_high": 0.45,
         "energy_threshold": 0.20,
         "sharpness_threshold": 1500.0,
+        # 尖鋭度だけでは直線エッジを網点と区別できないため追加した2条件。
+        "min_block_std": 6.0,
+        "min_direction_ratio": 0.20,
     },
     "fill": {
         "black_threshold": 64,
         "min_area_ratio": 0.0008,
-        "erosion_radius": 2,
+        # 実原稿での実測に基づき 2 -> 8 に変更（ベタが線を巻き込む問題の修正）。
+        # 幅 2*8=16px 以下のストロークは線として残る（600dpi・B4 で約 1.3mm）。
+        "erosion_radius": 8,
     },
     "line": {
         "black_threshold": 128,
@@ -34,6 +39,8 @@ EXPECTED_DEFAULTS: dict[str, dict[str, float | int]] = {
         "oblique_angle_deg": 5.0,
         "spread_aspect_ratio": 1.2,
         "effect_line_density": 0.15,
+        # 絵を枠線と誤認して内側へ食い込んだポリゴンの検出（凸性の下限）。
+        "min_solidity": 0.8,
     },
     "balloon": {
         "min_area_ratio": 0.002,
@@ -43,6 +50,7 @@ EXPECTED_DEFAULTS: dict[str, dict[str, float | int]] = {
         "min_solidity": 0.90,
         "dilate_radius": 12,
         "text_rect_dilate": 24,
+        "require_text_overlap": True,
     },
     "preview": {
         "max_long_side": 1600,

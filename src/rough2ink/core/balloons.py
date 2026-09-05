@@ -79,6 +79,16 @@ def detect_balloons(
     if use_white_fill or use_solidity:
         barrier = _panel_border_barrier(gray)
         components = _white_connected_components(gray, params.white_threshold, barrier)
+
+        # テキスト矩形が使えるときは、白領域由来の候補をそれで絞る（フキダシには
+        # ほぼ必ずセリフが入るため、セリフと重ならない白領域はフキダシではない）。
+        # 絵の中の白い領域（モニタ画面・白い床・明るい背景）の誤検出を落とすのが目的。
+        allowed_labels = None
+        if params.require_text_overlap and use_text_rects and text_rects:
+            allowed_labels = _labels_overlapping_text(
+                gray.shape, components, text_rects, params.text_rect_dilate
+            )
+
         if use_white_fill:
             union |= _white_fill_mask(
                 gray,
@@ -87,6 +97,7 @@ def detect_balloons(
                 max_area_ratio=params.max_area_ratio,
                 white_threshold=params.white_threshold,
                 white_fill_ratio=params.white_fill_ratio,
+                allowed_labels=allowed_labels,
             )
         if use_solidity:
             union |= _solidity_mask(
@@ -95,9 +106,30 @@ def detect_balloons(
                 min_area_ratio=params.min_area_ratio,
                 max_area_ratio=params.max_area_ratio,
                 min_solidity=params.min_solidity,
+                allowed_labels=allowed_labels,
             )
 
     return _dilate(union, params.dilate_radius)
+
+
+def _labels_overlapping_text(
+    shape: tuple[int, int],
+    components: _Components,
+    text_rects: list[BBox],
+    dilate_px: int,
+) -> set[int]:
+    """膨張させたテキスト矩形に重なる白連結成分のラベル ID を返す。
+
+    **PSD 入力（テキストレイヤーがある）でのみ使える絞り込み。** 画像 / PDF 入力では
+    テキスト矩形が得られないため呼ばれず、従来どおり白領域の形状だけで判定する。
+    セリフをラスタライズしている原稿でもテキストレイヤーが取れないため、
+    `text_rects` が空のときは呼び出し側でこの絞り込み自体を行わない
+    （空集合を返すと全てのフキダシが落ちてしまう）。
+    """
+    _num_labels, labels, _stats = components
+    text_zone = _dilate(_text_rect_mask(shape, text_rects, 0), dilate_px) > 0
+    overlapping = np.unique(labels[text_zone])
+    return {int(label) for label in overlapping if label != 0}
 
 
 def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -208,6 +240,7 @@ def _white_fill_mask(
     max_area_ratio: float,
     white_threshold: int,
     white_fill_ratio: float,
+    allowed_labels: set[int] | None = None,
 ) -> np.ndarray:
     """手がかり 2: 一定面積以上で内部がほぼ白の連結領域を検出する（フチなしフキダシも拾う）。
 
@@ -226,6 +259,8 @@ def _white_fill_mask(
 
     mask = np.zeros(gray.shape, dtype=np.uint8)
     for label_id in range(1, num_labels):
+        if allowed_labels is not None and label_id not in allowed_labels:
+            continue
         area = stats[label_id, cv2.CC_STAT_AREA]
         if area < min_area or area > max_area:
             continue
@@ -249,6 +284,7 @@ def _solidity_mask(
     min_area_ratio: float,
     max_area_ratio: float,
     min_solidity: float,
+    allowed_labels: set[int] | None = None,
 ) -> np.ndarray:
     """手がかり 3: 凸包面積比（solidity）が高い（楕円・角丸の凸形状）連結領域を検出する。
 
@@ -268,6 +304,8 @@ def _solidity_mask(
 
     mask = np.zeros(shape, dtype=np.uint8)
     for label_id in range(1, num_labels):
+        if allowed_labels is not None and label_id not in allowed_labels:
+            continue
         area = stats[label_id, cv2.CC_STAT_AREA]
         if area < min_area or area > max_area:
             continue

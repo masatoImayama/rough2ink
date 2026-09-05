@@ -12,7 +12,14 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from rough2ink.api import routes_analyze, routes_batch, routes_gt, routes_ingest, routes_presets
+from rough2ink.api import (
+    routes_analyze,
+    routes_autofit,
+    routes_batch,
+    routes_gt,
+    routes_ingest,
+    routes_presets,
+)
 from rough2ink.core.params import AnalysisParams
 
 # src/rough2ink/app.py から見て 2 階層上がプロジェクトルート
@@ -38,6 +45,7 @@ app.include_router(routes_gt.router)
 app.include_router(routes_analyze.router)
 app.include_router(routes_presets.router)
 app.include_router(routes_batch.router)
+app.include_router(routes_autofit.router)
 
 # 静的配信は API ルートより後にマウントする（先に登録した具体的なパスが優先される）。
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

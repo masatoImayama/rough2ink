@@ -47,14 +47,39 @@ section {
   align-items: flex-start;
 }
 
+/* サイドバーは固定幅。`min-width: 0` を明示しないと、中の .param-row が
+   min-content 幅（ラベル+数値+スライダー既定幅）まで広がって右へはみ出し、
+   #viewer に重なって見える。パラメータが長いので単独スクロールさせ、
+   6・7 のセクションが下へ押し流されないよう sticky で追従させる。 */
 #sidebar {
-  flex: 0 0 320px;
-  min-width: 260px;
+  flex: 0 0 340px;
+  min-width: 0;
+  position: sticky;
+  top: 0.5rem;
+  max-height: calc(100vh - 1.5rem);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 0.5rem;
 }
 
 #viewer {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* 画面が狭いときは横並びをやめて縦積みにする（サイドバーの sticky も解除）。 */
+@media (max-width: 900px) {
+  #main-layout {
+    flex-direction: column;
+  }
+
+  #sidebar {
+    flex: 1 1 auto;
+    width: 100%;
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
 }
 
 #page-list {
@@ -93,11 +118,16 @@ section {
 }
 
 .param-row .param-name {
-  flex: 0 0 9.5rem;
+  flex: 0 1 8.5rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
+/* flex アイテムの既定 `min-width: auto` を解除しないと、スライダーが既定幅より
+   縮まずサイドバーの外へはみ出す（#viewer に重なる原因だった）。 */
 .param-row input[type="range"] {
-  flex: 1 1 auto;
+  flex: 1 1 4rem;
+  min-width: 0;
 }
 
 .param-row .param-value {
@@ -109,6 +139,8 @@ section {
 fieldset {
   border: 1px solid var(--border-color);
   margin-bottom: 0.6rem;
+  /* fieldset は既定で min-width が min-content 相当になり、縮小を拒否する。 */
+  min-width: 0;
 }
 
 legend {
@@ -156,16 +188,56 @@ legend {
   width: 5rem;
 }
 
+/* ズーム操作（拡大時は canvas が枠より大きくなるので、この枠内でスクロールして見る）。 */
+#zoom-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+}
+
+#zoom-controls button {
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+}
+
+#zoom-controls .zoom-step {
+  width: 2rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+#zoom-range {
+  flex: 0 1 12rem;
+  min-width: 0;
+}
+
+#zoom-value {
+  flex: 0 0 3.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+#zoom-controls .hint {
+  color: #666;
+  margin-left: 0.25rem;
+}
+
 #canvas-wrap {
   border: 1px solid var(--border-color);
   overflow: auto;
-  max-height: 75vh;
+  height: 70vh;
+  /* 枠の高さはユーザーが引き伸ばせる（7. 指標 と並べて見たい場合に縮められる）。 */
+  resize: vertical;
+  background: #f4f4f4;
 }
 
+/* 表示サイズは JS が `style.width` で与える（ズーム倍率）。ここで max-width を
+   掛けると拡大できなくなるので指定しない。 */
 #overlay-canvas {
   display: block;
-  max-width: 100%;
-  height: auto;
 }
 
 .layer-table {
@@ -179,6 +251,62 @@ legend {
   border: 1px solid var(--border-color);
   padding: 0.2rem 0.4rem;
   text-align: left;
+  vertical-align: middle;
+}
+
+.layer-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.layer-controls .hint {
+  color: #666;
+  font-size: 0.8rem;
+}
+
+/* レイヤーの縮小画像。白抜きレイヤーも見えるよう中間色の背景に合成済み。 */
+.layer-thumb {
+  display: block;
+  width: 48px;
+  height: auto;
+  max-height: 64px;
+  object-fit: contain;
+  background: #b0b0b0;
+}
+
+.layer-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 墨が多いレイヤーは、名前が「線」でも実体がベタのことがある（要確認）。 */
+.layer-row--heavy {
+  background: #fff4e5;
+}
+
+/* 画素を持たない空レイヤー。割り当てても GT に何も寄与しない。 */
+.layer-row--empty {
+  color: #999;
+  background: #f6f6f6;
+}
+
+.layer-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: #555;
+  white-space: nowrap;
+}
+
+.layer-badge--warn {
+  border-color: #d08a00;
+  color: #a06600;
 }
 
 #quality-report dl {
@@ -206,4 +334,16 @@ legend {
 #gt-metrics td {
   border: 1px solid var(--border-color);
   padding: 0.2rem 0.5rem;
+}
+
+/* GT に合わせた自動調整（パラメータ探索）の結果表示。 */
+#autofit-controls {
+  margin-bottom: 0.75rem;
+}
+
+.autofit-changes {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+  color: #444;
 }
