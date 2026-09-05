@@ -48,6 +48,12 @@ function tintMask(img, color) {
 
 const RASTER_MASK_KINDS = ["fill", "tone", "line", "balloon"]; // 描画順（優先順位の低い順に下から重ねる）
 
+export const ZOOM_MIN = 0.1;
+export const ZOOM_MAX = 4;
+
+/** 拡大時にマスク境界を補間でぼかさない閾値（画素単位で分解結果を確認するため）。 */
+const PIXELATED_FROM = 2;
+
 export class OverlayRenderer {
   constructor(canvas) {
     this.canvas = canvas;
@@ -62,6 +68,36 @@ export class OverlayRenderer {
       balloon: { visible: true, opacity: 0.4 },
       panel: { visible: true, opacity: 1.0 },
     };
+    // 表示倍率。canvas の内部解像度（プレビュー実サイズ）は変えず、CSS 幅だけを変える。
+    // 内部解像度を変えると再描画のたびにマスクを描き直すことになり、拡大操作が重くなる。
+    this.zoom = 1;
+    // "fit" のときはコンテナ幅の変化に追従する（ページ切り替え・ウィンドウリサイズ時）。
+    this.zoomMode = "fit";
+  }
+
+  /** 表示倍率を設定する。範囲外は丸める。実際に適用された倍率を返す。 */
+  setZoom(zoom, { mode = "manual" } = {}) {
+    const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom));
+    this.zoom = clamped;
+    this.zoomMode = mode;
+    this.applyZoom();
+    return clamped;
+  }
+
+  /** 現在の倍率を CSS 幅として canvas に反映する。 */
+  applyZoom() {
+    if (!this.baseImage) return;
+    this.canvas.style.width = `${this.canvas.width * this.zoom}px`;
+    this.canvas.style.height = "auto";
+    this.canvas.style.imageRendering = this.zoom >= PIXELATED_FROM ? "pixelated" : "auto";
+  }
+
+  /** コンテナの内寸に合わせて倍率を決める（"幅に合わせる"）。適用された倍率を返す。 */
+  fitToWidth(containerWidth) {
+    if (!this.baseImage || !containerWidth) return this.zoom;
+    // 枠線とスクロールバーの分を少し引いて、横スクロールが出ないようにする。
+    const available = Math.max(1, containerWidth - 18);
+    return this.setZoom(available / this.canvas.width, { mode: "fit" });
   }
 
   setLayerState(kind, partialState) {
@@ -74,6 +110,8 @@ export class OverlayRenderer {
     this.baseImage = await loadImage(previewUrl);
     this.canvas.width = this.baseImage.naturalWidth;
     this.canvas.height = this.baseImage.naturalHeight;
+    // 内部解像度が変わったので、現在の倍率を新しいサイズに対して掛け直す。
+    this.applyZoom();
   }
 
   /** 再解析のたびに呼ぶ。`kind` は "line"|"fill"|"tone"|"balloon"。 */

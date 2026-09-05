@@ -7,7 +7,7 @@
 
 import * as api from "./api.js";
 import { debounce, renderParamControls } from "./params.js";
-import { OverlayRenderer } from "./overlay.js";
+import { OverlayRenderer, ZOOM_MAX, ZOOM_MIN } from "./overlay.js";
 import { renderLayerMapping } from "./layers.js";
 import { renderPresetControls } from "./presets.js";
 
@@ -19,6 +19,8 @@ const REANALYZE_DEBOUNCE_MS = 400;
 const state = {
   pageId: null,
   params: null,
+  // setupZoomControls が設定する「幅に合わせる」の実行関数（ページ切り替え時に再適用する）。
+  fitZoom: null,
 };
 
 let overlay;
@@ -41,6 +43,8 @@ async function init() {
 
   renderParamControls(byId("param-controls"), state.params, () => debouncedReanalyze());
   setupLayerToggles();
+  setupZoomControls();
+  setupAutofitControls();
   await renderPresetControls(byId("preset-controls"), () => state.params, applyPresetParams);
   await refreshPageList();
 
@@ -58,6 +62,144 @@ function setupLayerToggles() {
       overlay.setLayerState(kind, { opacity: Number(opacityInput.value) });
     });
   }
+}
+
+/**
+ * ズーム操作を配線する。倍率は canvas の内部解像度ではなく CSS 幅で与えるため、
+ * 拡大してもマスクの再描画は起きない（スライダー操作が重くならない）。
+ */
+function setupZoomControls() {
+  const range = byId("zoom-range");
+  const wrap = byId("canvas-wrap");
+
+  // 倍率の上下限は overlay.js を単一の出所にする（HTML の値はフォールバック）。
+  range.min = String(Math.round(ZOOM_MIN * 100));
+  range.max = String(Math.round(ZOOM_MAX * 100));
+
+  const syncIndicator = () => {
+    const percent = Math.round(overlay.zoom * 100);
+    range.value = String(Math.min(Number(range.max), Math.max(Number(range.min), percent)));
+    byId("zoom-value").textContent = `${percent}%`;
+  };
+
+  const applyZoom = (zoom, options) => {
+    overlay.setZoom(zoom, options);
+    syncIndicator();
+  };
+
+  const fit = () => {
+    overlay.fitToWidth(wrap.clientWidth);
+    syncIndicator();
+  };
+
+  range.addEventListener("input", () => applyZoom(Number(range.value) / 100));
+  byId("zoom-in").addEventListener("click", () => applyZoom(overlay.zoom * 1.25));
+  byId("zoom-out").addEventListener("click", () => applyZoom(overlay.zoom / 1.25));
+  byId("zoom-reset").addEventListener("click", () => applyZoom(1));
+  byId("zoom-fit").addEventListener("click", fit);
+
+  // Ctrl+ホイールで拡大縮小（ブラウザのページズームは preventDefault で抑止する）。
+  wrap.addEventListener(
+    "wheel",
+    (event) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      applyZoom(overlay.zoom * (event.deltaY < 0 ? 1.1 : 1 / 1.1));
+    },
+    { passive: false },
+  );
+
+  // "幅に合わせる" を選んでいる間はウィンドウ幅の変化に追従する。
+  window.addEventListener("resize", () => {
+    if (overlay.zoomMode === "fit") fit();
+  });
+
+  state.fitZoom = fit;
+  syncIndicator();
+}
+
+/**
+ * GT に対するパラメータ自動フィッティングを配線する。
+ *
+ * 設計書 3章はレイヤー付き原稿を「分解器の教師データ兼検証データ」と位置づけている。
+ * 26個のスライダーを目視で合わせるのではなく、正解に対して当てにいくのが本来の運用。
+ * 探索は数十秒かかるためバックグラウンドで走らせ、進捗をポーリングする。
+ */
+function setupAutofitControls() {
+  const button = byId("autofit-run");
+  const statusEl = byId("autofit-status");
+  const resultEl = byId("autofit-result");
+
+  const formatScore = (value) => (value == null ? "-" : value.toFixed(3));
+
+  const renderResult = (job) => {
+    resultEl.innerHTML = "";
+    const summary = document.createElement("p");
+    summary.className = "status";
+    summary.textContent =
+      `マクロ平均F1: ${formatScore(job.baseline_score)} → ${formatScore(job.best_score)}` +
+      `（評価クロップ ${job.sample_count} 枚）`;
+    resultEl.appendChild(summary);
+
+    const changed = job.changed ?? {};
+    const keys = Object.keys(changed);
+    if (keys.length === 0) {
+      const none = document.createElement("p");
+      none.className = "status";
+      none.textContent = "変更されたパラメータはありません（現在値が最良でした）。";
+      resultEl.appendChild(none);
+      return;
+    }
+    const list = document.createElement("ul");
+    list.className = "autofit-changes";
+    for (const key of keys) {
+      const [before, after] = changed[key];
+      const item = document.createElement("li");
+      item.textContent = `${key}: ${before} → ${after}`;
+      list.appendChild(item);
+    }
+    resultEl.appendChild(list);
+  };
+
+  const poll = async (jobId) => {
+    for (;;) {
+      const job = await api.getAutofitStatus(jobId);
+      if (job.status === "running") {
+        statusEl.textContent =
+          `探索中... ${job.evaluated}/${job.total}` +
+          (job.current_parameter ? `（${job.current_parameter}）` : "") +
+          (job.best_score != null ? ` 最良F1=${formatScore(job.best_score)}` : "");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        continue;
+      }
+      return job;
+    }
+  };
+
+  button.addEventListener("click", async () => {
+    if (!state.pageId) {
+      statusEl.textContent = "先にページを選択してください。";
+      return;
+    }
+    button.disabled = true;
+    resultEl.innerHTML = "";
+    statusEl.textContent = "探索を開始しています...";
+    try {
+      const started = await api.startAutofit(state.pageId, state.params);
+      const job = await poll(started.job_id);
+      if (job.status === "error") {
+        statusEl.textContent = `自動調整に失敗しました: ${job.error}`;
+        return;
+      }
+      statusEl.textContent = "自動調整が完了し、パラメータに反映しました。";
+      renderResult(job);
+      await applyPresetParams(job.params);
+    } catch (err) {
+      statusEl.textContent = `自動調整に失敗しました: ${err.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
 }
 
 async function onUpload(event) {
@@ -105,6 +247,8 @@ async function selectPage(pageId) {
 
     await overlay.loadBase(api.previewUrl(pageId));
     overlay.redraw();
+    // ページごとにプレビュー寸法が違うため、"幅に合わせる" 中は選択のたびに合わせ直す。
+    if (overlay.zoomMode === "fit" && state.fitZoom) state.fitZoom();
 
     await reanalyze();
   } catch (err) {

@@ -74,6 +74,55 @@ def test_reanalyze_guards_against_out_of_order_responses() -> None:
     assert "AbortController" in reanalyze_body
 
 
+def test_overlay_has_zoom_controls() -> None:
+    """オーバーレイに拡大縮小 UI があること。JS 実行系が無い（非機能要件）ため、
+    コントロールの存在と配線をソース上で構造的に検証する。"""
+    html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    for element_id in ("zoom-range", "zoom-in", "zoom-out", "zoom-fit", "zoom-reset", "zoom-value"):
+        assert f'id="{element_id}"' in html, element_id
+
+    app_source = (WEB_DIR / "js" / "app.js").read_text(encoding="utf-8")
+    assert "setupZoomControls" in app_source
+    # Ctrl+ホイールでの拡大縮小（ブラウザのページズームは抑止する）。
+    assert '"wheel"' in app_source
+    assert "preventDefault" in app_source
+
+
+def test_zoom_scales_via_css_width_not_canvas_resolution() -> None:
+    """ズームは canvas の内部解像度ではなく CSS 幅で行うこと。内部解像度を変えると
+    倍率変更のたびにマスクを描き直すことになり、拡大操作が重くなる。"""
+    source = (WEB_DIR / "js" / "overlay.js").read_text(encoding="utf-8")
+
+    apply_zoom_start = source.index("applyZoom() {")
+    apply_zoom_body = source[apply_zoom_start : source.index("\n  }", apply_zoom_start)]
+    assert "style.width" in apply_zoom_body
+    # `canvas.width = ...`（内部解像度の変更）を倍率適用で行っていないこと。
+    assert "this.canvas.width =" not in apply_zoom_body
+
+    assert "ZOOM_MIN" in source and "ZOOM_MAX" in source
+    assert "fitToWidth" in source
+
+
+def test_sidebar_range_inputs_can_shrink_below_intrinsic_width() -> None:
+    """5.パラメータ が 6.オーバーレイ表示 に重なっていた回帰。flex アイテムの既定
+    `min-width: auto` を解除しないと、スライダーが既定幅より縮まずサイドバー幅
+    （固定）を突き抜けて #viewer に重なる。"""
+    css = (WEB_DIR / "css" / "style.css").read_text(encoding="utf-8")
+
+    range_rule_start = css.index('.param-row input[type="range"]')
+    range_rule = css[range_rule_start : css.index("}", range_rule_start)]
+    assert "min-width: 0" in range_rule
+
+    sidebar_rule_start = css.index("#sidebar {")
+    sidebar_rule = css[sidebar_rule_start : css.index("}", sidebar_rule_start)]
+    assert "min-width: 0" in sidebar_rule
+
+    # fieldset も既定で min-content 幅を下回れないため、同じ理由で解除が要る。
+    fieldset_rule_start = css.index("fieldset {")
+    fieldset_rule = css[fieldset_rule_start : css.index("}", fieldset_rule_start)]
+    assert "min-width: 0" in fieldset_rule
+
+
 def test_no_node_dependency_or_cdn_reference_anywhere_in_web_dir() -> None:
     """非機能要件・完了条件: npm / node_modules / CDN リンクが一切存在しないこと。"""
     forbidden_substrings = ["node_modules", "unpkg.com", "cdn.jsdelivr.net", "cdnjs.cloudflare.com"]
